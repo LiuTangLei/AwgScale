@@ -122,15 +122,9 @@ struct SubnetRoutesView: View {
         
         // Parse routes from prefs/status
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/status")
-            
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                error = "Failed to load status"
-                isLoading = false
-                return
-            }
+            let endpoint = "/localapi/v0/status"
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            let bodyData = try resp.bodyData(endpoint: endpoint)
             
             if let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
                let peer = json["Peer"] as? [String: Any] {
@@ -157,7 +151,7 @@ struct SubnetRoutesView: View {
             routes = allRoutes.sorted { $0.cidr < $1.cidr }
             isLoading = false
         } catch {
-            self.error = "Failed to parse routes: \(error.localizedDescription)"
+            self.error = "Failed to load routes: \(error.localizedDescription)"
             isLoading = false
         }
     }

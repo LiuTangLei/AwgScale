@@ -189,11 +189,10 @@ struct BugReportView: View {
                 
                 // Fetch logs from LocalAPI
                 do {
-                    let logsResp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/bugreport")
-                    if logsResp.statusCode == 200,
-                       let bodyB64 = logsResp.bodyBase64,
-                       let bodyData = Data(base64Encoded: bodyB64),
-                       let logsStr = String(data: bodyData, encoding: .utf8) {
+                    let endpoint = "/localapi/v0/bugreport"
+                    let logsResp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+                    let bodyData = try logsResp.bodyData(endpoint: endpoint)
+                    if let logsStr = String(data: bodyData, encoding: .utf8) {
                         diagnostics["bugreport_logs"] = logsStr
                     }
                 } catch {

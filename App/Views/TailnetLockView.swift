@@ -229,18 +229,16 @@ struct TailnetLockView: View {
         error = nil
         
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/tka/status")
-            
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
+            let endpoint = "/localapi/v0/tka/status"
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            if resp.statusCode == 404 {
                 // 404 or other means TKA not available
                 lockStatus = nil
                 isLoading = false
                 return
             }
             
-            let status = try JSONDecoder().decode(TKAStatusResponse.self, from: bodyData)
+            let status = try resp.decodedBody(TKAStatusResponse.self, endpoint: endpoint)
             lockStatus = TailnetLockStatus(from: status)
             isLoading = false
         } catch {
@@ -256,16 +254,13 @@ struct TailnetLockView: View {
         
         Task {
             do {
+                let endpoint = "/localapi/v0/tka/sign"
                 let body = try JSONEncoder().encode(["url": url])
-                let resp = try await vpn.callLocalAPI(method: "POST", endpoint: "/localapi/v0/tka/sign", body: body)
+                let resp = try await vpn.callLocalAPI(method: "POST", endpoint: endpoint, body: body)
+                try resp.requireSuccess(endpoint: endpoint)
                 
                 await MainActor.run {
                     isSigning = false
-                    if resp.statusCode == 200 {
-                        // Success
-                    } else {
-                        appState.lastError = "Signing failed (status \(resp.statusCode))"
-                    }
                 }
             } catch {
                 await MainActor.run {

@@ -164,20 +164,12 @@ struct ProfilesView: View {
         error = nil
         
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/profiles/")
-            
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                error = "Failed to load profiles"
-                isLoading = false
-                return
-            }
-            
-            profiles = try JSONDecoder().decode([LoginProfile].self, from: bodyData)
+            let endpoint = "/localapi/v0/profiles/"
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            profiles = try resp.decodedBody([LoginProfile].self, endpoint: endpoint)
             isLoading = false
         } catch {
-            self.error = "Failed to parse profiles: \(error.localizedDescription)"
+            self.error = "Failed to load profiles: \(error.localizedDescription)"
             isLoading = false
         }
     }
@@ -196,7 +188,8 @@ struct ProfilesView: View {
                 
                 // Switch profile
                 let endpoint = "/localapi/v0/profiles/\(profile.ID)"
-                let _ = try await vpn.callLocalAPI(method: "POST", endpoint: endpoint)
+                let resp = try await vpn.callLocalAPI(method: "POST", endpoint: endpoint)
+                try resp.requireSuccess(endpoint: endpoint)
                 
                 // Wait and reconnect
                 try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -221,7 +214,8 @@ struct ProfilesView: View {
         Task {
             do {
                 let endpoint = "/localapi/v0/profiles/\(profile.ID)"
-                let _ = try await vpn.callLocalAPI(method: "DELETE", endpoint: endpoint)
+                let resp = try await vpn.callLocalAPI(method: "DELETE", endpoint: endpoint)
+                try resp.requireSuccess(endpoint: endpoint)
                 await loadProfiles()
             } catch {
                 await MainActor.run {

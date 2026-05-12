@@ -124,28 +124,20 @@ struct TaildropView: View {
         error = nil
         
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/files")
-            
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                if resp.statusCode == 404 {
-                    incomingFiles = loadLocalIncomingFiles()
-                    isLoading = false
-                    return
-                }
-                // 204 or empty response means no files
-                if resp.statusCode == 204 || resp.statusCode == 200 {
-                    incomingFiles = []
-                    isLoading = false
-                    return
-                }
-                error = "Failed to load files (status \(resp.statusCode))"
+            let endpoint = "/localapi/v0/files"
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            if resp.statusCode == 404 {
+                incomingFiles = loadLocalIncomingFiles()
+                isLoading = false
+                return
+            }
+            if resp.statusCode == 204 || (resp.statusCode == 200 && resp.bodyBase64 == nil) {
+                incomingFiles = []
                 isLoading = false
                 return
             }
             
-            let files = try JSONDecoder().decode([TaildropFileResponse].self, from: bodyData)
+            let files = try resp.decodedBody([TaildropFileResponse].self, endpoint: endpoint)
             incomingFiles = files.map { TaildropFile(from: $0) }
             isLoading = false
         } catch {
@@ -391,7 +383,8 @@ struct TaildropSendView: View {
                     
                     // PUT to /localapi/v0/file-put/{peerID}/{filename}
                     let endpoint = "/localapi/v0/file-put/\(peer.id)/\(fileName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileName)"
-                    let _ = try await vpn.callLocalAPI(method: "PUT", endpoint: endpoint, body: data)
+                    let resp = try await vpn.callLocalAPI(method: "PUT", endpoint: endpoint, body: data)
+                    try resp.requireSuccess(endpoint: endpoint)
                     
                     await MainActor.run {
                         sendProgress = Double(index + 1) / Double(totalFiles)

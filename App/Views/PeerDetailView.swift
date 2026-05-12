@@ -398,30 +398,18 @@ struct PingView: View {
                 do {
                     let endpoint = "/localapi/v0/ping?ip=\(targetIP)&type=disco"
                     let resp = try await vpn.callLocalAPI(method: "POST", endpoint: endpoint, timeout: 3000)
-                    
-                    if resp.statusCode == 200,
-                       let bodyB64 = resp.bodyBase64,
-                       let bodyData = Data(base64Encoded: bodyB64) {
-                        if let result = try? JSONDecoder().decode(PingAPIResponse.self, from: bodyData),
-                           let error = result.Err,
-                           !error.isEmpty {
-                            await MainActor.run {
-                                pingResults.append(PingResult(seq: seq, error: error))
-                            }
-                        } else if let result = try? JSONDecoder().decode(PingAPIResponse.self, from: bodyData),
-                                  let latency = result.LatencySeconds {
-                            await MainActor.run {
-                                pingResults.append(PingResult(seq: seq, latencyMs: latency * 1000))
-                            }
-                        } else {
-                            await MainActor.run {
-                                pingResults.append(PingResult(seq: seq, error: "Invalid response"))
-                            }
+                    let result = try resp.decodedBody(PingAPIResponse.self, endpoint: endpoint)
+                    if let error = result.Err, !error.isEmpty {
+                        await MainActor.run {
+                            pingResults.append(PingResult(seq: seq, error: error))
+                        }
+                    } else if let latency = result.LatencySeconds {
+                        await MainActor.run {
+                            pingResults.append(PingResult(seq: seq, latencyMs: latency * 1000))
                         }
                     } else {
-                        let errorMessage = pingErrorMessage(from: resp)
                         await MainActor.run {
-                            pingResults.append(PingResult(seq: seq, error: errorMessage))
+                            pingResults.append(PingResult(seq: seq, error: "Invalid response"))
                         }
                     }
                 } catch {
@@ -440,16 +428,6 @@ struct PingView: View {
         }
     }
 
-    private func pingErrorMessage(from response: IPCResponse) -> String {
-        if let bodyB64 = response.bodyBase64,
-           let bodyData = Data(base64Encoded: bodyB64),
-           let body = String(data: bodyData, encoding: .utf8),
-           !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return body.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return response.error ?? "Request failed"
-    }
-    
     private func latencyColor(_ ms: Double) -> Color {
         if ms < 50 { return .green }
         if ms < 150 { return .orange }
