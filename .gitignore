@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive
+*.dSYM
+
+# Generated gomobile framework
+Libtailscale.xcframework/
+
+# SwiftPM/Xcode generated state
+.swiftpm/
+Package.resolved
+
+# Logs and local diagnostics
+*.log
+logs.txt
+libtailscale/logs.txt
+
+# Go local workspace files
+go.work
+go.work.sum
+
+# Temporary files
+docs.tmp/
+*.tmp
+*.swp
