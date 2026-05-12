@@ -92,9 +92,14 @@ func TestTunnelConfigOnConfigUpdateDelivers(t *testing.T) {
 	if len(tc.LocalAddresses) != 2 {
 		t.Errorf("LocalAddresses = %v", tc.LocalAddresses)
 	}
-	for _, want := range []string{"10.1.0.0/16", "fd00::/8", "100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+	for _, want := range []string{"10.1.0.0/16", "fd00::/8"} {
 		if !containsString(tc.Routes, want) {
 			t.Errorf("Routes = %v, missing %s", tc.Routes, want)
+		}
+	}
+	for _, unwanted := range []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+		if containsString(tc.Routes, unwanted) {
+			t.Errorf("Routes = %v, must not add hard-coded %s", tc.Routes, unwanted)
 		}
 	}
 	if len(tc.ExcludeRoutes) != 1 || tc.ExcludeRoutes[0] != "192.168.1.0/24" {
@@ -191,7 +196,7 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func TestTunnelConfigEmptyRoutesFallback(t *testing.T) {
+func TestTunnelConfigEmptyRoutesStayEmpty(t *testing.T) {
 	mgr := &tunnelConfigManager{}
 	cb := &recordingCallback{}
 	mgr.setCallback(cb)
@@ -209,12 +214,12 @@ func TestTunnelConfigEmptyRoutesFallback(t *testing.T) {
 	if err := json.Unmarshal(configs[0], &tc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(tc.Routes) != 2 {
-		t.Errorf("Routes = %v, want CGNAT+ULA fallback", tc.Routes)
+	if len(tc.Routes) != 0 {
+		t.Errorf("Routes = %v, want empty routes to stay empty", tc.Routes)
 	}
 }
 
-func TestTunnelConfigDoesNotExcludeCoreRoutes(t *testing.T) {
+func TestTunnelConfigExcludesLocalRoutesExceptLoopback(t *testing.T) {
 	mgr := &tunnelConfigManager{}
 	cb := &recordingCallback{}
 	mgr.setCallback(cb)
@@ -237,16 +242,49 @@ func TestTunnelConfigDoesNotExcludeCoreRoutes(t *testing.T) {
 	if err := json.Unmarshal(configs[0], &tc); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !containsString(tc.Routes, "100.64.0.0/10") {
-		t.Fatalf("Routes = %v, missing CGNAT route", tc.Routes)
+	for _, want := range []string{"100.64.0.0/10", "100.64.0.36/32", "fd7a:115c:a1e0::/48", "192.168.1.0/24"} {
+		if !containsString(tc.ExcludeRoutes, want) {
+			t.Fatalf("ExcludeRoutes = %v, missing %s", tc.ExcludeRoutes, want)
+		}
 	}
-	for _, forbidden := range []string{"100.64.0.0/10", "100.64.0.36/32", "fd7a:115c:a1e0::/48", "127.0.0.1/32"} {
+	for _, forbidden := range []string{"127.0.0.1/32"} {
 		if containsString(tc.ExcludeRoutes, forbidden) {
 			t.Fatalf("ExcludeRoutes = %v, must not contain %s", tc.ExcludeRoutes, forbidden)
 		}
 	}
-	if !containsString(tc.ExcludeRoutes, "192.168.1.0/24") {
-		t.Fatalf("ExcludeRoutes = %v, missing LAN route", tc.ExcludeRoutes)
+}
+
+func TestTunnelConfigPreservesCustomHeadscaleRoutes(t *testing.T) {
+	mgr := &tunnelConfigManager{}
+	cb := &recordingCallback{}
+	mgr.setCallback(cb)
+
+	rc := &router.Config{
+		LocalAddrs: []netip.Prefix{netip.MustParsePrefix("172.18.0.42/32")},
+		Routes: []netip.Prefix{
+			netip.MustParsePrefix("172.18.0.0/16"),
+			netip.MustParsePrefix("10.42.7.9/24"),
+		},
+		NewMTU: 1280,
+	}
+	if err := mgr.onConfigUpdate(rc, nil); err != nil {
+		t.Fatalf("onConfigUpdate: %v", err)
+	}
+
+	configs := cb.snapshot()
+	var tc TunnelConfig
+	if err := json.Unmarshal(configs[0], &tc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, want := range []string{"172.18.0.0/16", "10.42.7.0/24"} {
+		if !containsString(tc.Routes, want) {
+			t.Fatalf("Routes = %v, missing %s", tc.Routes, want)
+		}
+	}
+	for _, unwanted := range []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+		if containsString(tc.Routes, unwanted) {
+			t.Fatalf("Routes = %v, must not add %s", tc.Routes, unwanted)
+		}
 	}
 }
 

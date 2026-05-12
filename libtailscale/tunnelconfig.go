@@ -11,11 +11,6 @@ import (
 	"tailscale.com/wgengine/router"
 )
 
-var coreTunnelRoutes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
-}
-
 var exitNodePublicDNSServers = []string{
 	"8.8.8.8",
 	"8.8.4.4",
@@ -92,16 +87,15 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 
 	// Routes
 	for _, route := range rcfg.Routes {
-		tc.Routes = append(tc.Routes, route.String())
+		tc.Routes = append(tc.Routes, route.Masked().String())
 	}
-	tc.Routes = appendMissingCoreTunnelRoutes(tc.Routes)
 
 	// Excluded routes (routes that should stay outside the tunnel).
 	for _, route := range rcfg.LocalRoutes {
 		if shouldSkipExcludeRoute(route) {
 			continue
 		}
-		tc.ExcludeRoutes = append(tc.ExcludeRoutes, route.String())
+		tc.ExcludeRoutes = append(tc.ExcludeRoutes, route.Masked().String())
 	}
 
 	// DNS
@@ -125,6 +119,16 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 		log.Printf("exit node: using public DNS servers for NetworkExtension DNS to avoid PeerAPI DNS proxy timeout")
 		tc.DNSServers = append([]string(nil), exitNodePublicDNSServers...)
 	}
+	log.Printf("tunnel config: localAddrs=%d routes=%d excludeRoutes=%d dnsServers=%d searchDomains=%d matchDomains=%d mtu=%d hasDefaultRoute=%t",
+		len(tc.LocalAddresses),
+		len(tc.Routes),
+		len(tc.ExcludeRoutes),
+		len(tc.DNSServers),
+		len(tc.DNSDomains),
+		len(tc.DNSMatchDomains),
+		tc.MTU,
+		hasDefaultRoute(tc.Routes),
+	)
 
 	configJSON, err := json.Marshal(tc)
 	if err != nil {
@@ -147,32 +151,8 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 	return err
 }
 
-func appendMissingCoreTunnelRoutes(routes []string) []string {
-	seen := make(map[string]bool, len(routes)+len(coreTunnelRoutes))
-	for _, route := range routes {
-		seen[route] = true
-	}
-	for _, route := range coreTunnelRoutes {
-		routeStr := route.String()
-		if !seen[routeStr] {
-			routes = append(routes, routeStr)
-			seen[routeStr] = true
-		}
-	}
-	return routes
-}
-
 func shouldSkipExcludeRoute(route netip.Prefix) bool {
-	if route.Addr().IsLoopback() {
-		return true
-	}
-	route = route.Masked()
-	for _, coreRoute := range coreTunnelRoutes {
-		if route.Overlaps(coreRoute.Masked()) {
-			return true
-		}
-	}
-	return false
+	return route.Addr().IsLoopback()
 }
 
 func hasDefaultRoute(routes []string) bool {

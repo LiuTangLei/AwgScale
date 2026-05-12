@@ -244,6 +244,7 @@ class AppState: ObservableObject {
         }
 
         if notify.LoginFinished != nil {
+            isLoggingIn = false
             browseToURL = nil
             finishAppLogin()
         }

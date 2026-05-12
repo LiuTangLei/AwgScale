@@ -143,7 +143,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let config = try JSONDecoder().decode(TunnelConfigFromGo.self, from: configJSON)
             let settings = buildTunnelSettings(from: config)
             updateTunnelSettings(settings)
-            logger.log("tunnel config updated: \(config.localAddresses.count) addrs, \(config.routes.count) routes, \(config.dnsServers.count) DNS")
+            let hasDefaultRoute = config.routes.contains { $0 == "0.0.0.0/0" || $0 == "::/0" }
+            logger.log("tunnel config updated: \(config.localAddresses.count) addrs, \(config.routes.count) routes, \(config.excludeRoutes?.count ?? 0) excluded, \(config.dnsServers.count) DNS, defaultRoute=\(hasDefaultRoute)")
         } catch {
             logger.error("handleTunnelConfigUpdate: decode failed: \(error.localizedDescription)")
             sharedDefaults?.set("Tunnel config error: \(error.localizedDescription)",
@@ -188,11 +189,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // IPv4
         if !ipv4Addrs.isEmpty {
             let ipv4 = NEIPv4Settings(addresses: ipv4Addrs, subnetMasks: ipv4Masks)
-            var routes = config.routes.compactMap(makeIPv4Route)
-            if routes.isEmpty {
-                routes = [NEIPv4Route.default()]
-            }
-            ipv4.includedRoutes = routes
+            ipv4.includedRoutes = config.routes.compactMap(makeIPv4Route)
             let excludedRoutes = (config.excludeRoutes ?? []).compactMap(makeIPv4Route)
             if !excludedRoutes.isEmpty {
                 ipv4.excludedRoutes = excludedRoutes
@@ -203,11 +200,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // IPv6
         if !ipv6Addrs.isEmpty {
             let ipv6 = NEIPv6Settings(addresses: ipv6Addrs, networkPrefixLengths: ipv6PrefixLens)
-            var routes = config.routes.compactMap(makeIPv6Route)
-            if routes.isEmpty {
-                routes = [NEIPv6Route.default()]
-            }
-            ipv6.includedRoutes = routes
+            ipv6.includedRoutes = config.routes.compactMap(makeIPv6Route)
             let excludedRoutes = (config.excludeRoutes ?? []).compactMap(makeIPv6Route)
             if !excludedRoutes.isEmpty {
                 ipv6.excludedRoutes = excludedRoutes
@@ -381,8 +374,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func createInitialTunnelSettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "100.100.100.100")
 
-        let ipv4 = NEIPv4Settings(addresses: ["100.64.0.1"], subnetMasks: ["255.255.255.255"])
-        ipv4.includedRoutes = [NEIPv4Route(destinationAddress: "100.64.0.0", subnetMask: "255.192.0.0")]
+        let ipv4 = NEIPv4Settings(addresses: ["192.0.2.1"], subnetMasks: ["255.255.255.255"])
+        ipv4.includedRoutes = []
         settings.ipv4Settings = ipv4
 
         settings.mtu = 1280
