@@ -368,18 +368,24 @@ struct AddProfileView: View {
         Task {
             do {
                 // Create new profile
-                let _ = try await vpn.callLocalAPI(method: "POST", endpoint: "/localapi/v0/profiles/new")
+                let newProfileEndpoint = "/localapi/v0/profiles/new"
+                let newProfileResp = try await vpn.callLocalAPI(method: "POST", endpoint: newProfileEndpoint)
+                try newProfileResp.requireSuccess(endpoint: newProfileEndpoint)
                 
                 // Set control URL if custom
                 if useCustomServer && !controlURL.isEmpty {
+                    let prefsEndpoint = "/localapi/v0/prefs"
                     let prefs = MaskedPrefs.setControlURL(controlURL)
                     let body = try JSONEncoder().encode(prefs)
-                    let _ = try await vpn.callLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
+                    let prefsResp = try await vpn.callLocalAPI(method: "PATCH", endpoint: prefsEndpoint, body: body)
+                    try prefsResp.requireSuccess(endpoint: prefsEndpoint)
                 }
                 
                 // Login with auth key
+                let loginEndpoint = "/localapi/v0/login"
                 let loginBody = try JSONEncoder().encode(["authKey": authKey])
-                let _ = try await vpn.callLocalAPI(method: "POST", endpoint: "/localapi/v0/login", body: loginBody)
+                let loginResp = try await vpn.callLocalAPI(method: "POST", endpoint: loginEndpoint, body: loginBody)
+                try loginResp.requireSuccess(endpoint: loginEndpoint)
                 
                 await MainActor.run {
                     isAdding = false
