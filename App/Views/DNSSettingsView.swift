@@ -158,21 +158,13 @@ struct DNSSettingsView: View {
         error = nil
         
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/dns/config")
-            
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                error = "Failed to load DNS config"
-                isLoading = false
-                return
-            }
-            
-            let config = try JSONDecoder().decode(DNSConfigResponse.self, from: bodyData)
+            let endpoint = "/localapi/v0/dns/config"
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            let config = try resp.decodedBody(DNSConfigResponse.self, endpoint: endpoint)
             dnsConfig = DNSConfig(from: config)
             isLoading = false
         } catch {
-            self.error = "Failed to parse DNS config: \(error.localizedDescription)"
+            self.error = "Failed to load DNS config: \(error.localizedDescription)"
             isLoading = false
         }
     }

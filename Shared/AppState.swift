@@ -386,30 +386,18 @@ class AppState: ObservableObject {
     }
 
     private func editLoginBackendPrefs(_ prefs: MaskedPrefs) async throws -> Data {
+        let endpoint = "/localapi/v0/prefs"
         let body = try JSONEncoder().encode(prefs)
-        let resp = try await loginBackend.callLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
-        if let error = resp.error {
-            throw LoginFlowError.localAPI(error)
-        }
-        guard (200..<300).contains(resp.statusCode) else {
-            throw LoginFlowError.localAPI("HTTP \(resp.statusCode)")
-        }
-        guard let bodyB64 = resp.bodyBase64, let bodyData = Data(base64Encoded: bodyB64) else {
-            throw LoginFlowError.missingPrefsResponse
-        }
-        return bodyData
+        let resp = try await loginBackend.callLocalAPI(method: "PATCH", endpoint: endpoint, body: body)
+        return try resp.bodyData(endpoint: endpoint)
     }
 
     private func startLoginBackend(updatePrefsData: Data) async throws {
+        let endpoint = "/localapi/v0/start"
         let updatePrefs = try JSONSerialization.jsonObject(with: updatePrefsData)
         let body = try JSONSerialization.data(withJSONObject: ["UpdatePrefs": updatePrefs])
-        let resp = try await loginBackend.callLocalAPI(method: "POST", endpoint: "/localapi/v0/start", body: body, readBody: false)
-        if let error = resp.error {
-            throw LoginFlowError.localAPI(error)
-        }
-        guard (200..<300).contains(resp.statusCode) else {
-            throw LoginFlowError.localAPI("HTTP \(resp.statusCode)")
-        }
+        let resp = try await loginBackend.callLocalAPI(method: "POST", endpoint: endpoint, body: body, readBody: false)
+        try resp.requireSuccess(endpoint: endpoint)
     }
 
     private func describeError(_ error: Error) -> String {
@@ -529,13 +517,12 @@ class AppState: ObservableObject {
 
     func refreshTunnelStatus() async {
         guard let vpn = vpnManager else { return }
+        let endpoint = "/localapi/v0/status"
 
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/status", timeout: 3000)
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64),
-                  let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint, timeout: 3000)
+            let bodyData = try resp.bodyData(endpoint: endpoint)
+            guard let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
                 return
             }
 
@@ -601,12 +588,11 @@ class AppState: ObservableObject {
     }
 
     private func loginBackendStatusJSON(timeout: Int = 3000) async -> [String: Any]? {
+        let endpoint = "/localapi/v0/status"
         do {
-            let resp = try await loginBackend.callLocalAPI(method: "GET", endpoint: "/localapi/v0/status", timeout: timeout)
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64),
-                  let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
+            let resp = try await loginBackend.callLocalAPI(method: "GET", endpoint: endpoint, timeout: timeout)
+            let bodyData = try resp.bodyData(endpoint: endpoint)
+            guard let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any] else {
                 return nil
             }
 
@@ -652,13 +638,12 @@ class AppState: ObservableObject {
         }
 
         guard let vpn = vpnManager else { return nil }
+        let endpoint = "/localapi/v0/status"
 
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/status")
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64),
-                  let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            let bodyData = try resp.bodyData(endpoint: endpoint)
+            guard let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
                   let selfStatus = json["Self"] as? [String: Any] else { return nil }
 
             return (
@@ -672,9 +657,11 @@ class AppState: ObservableObject {
 
     private func setLoginBackendWantRunning(_ wantRunning: Bool) async {
         do {
+            let endpoint = "/localapi/v0/prefs"
             let prefs = MaskedPrefs.setWantRunning(wantRunning)
             let body = try JSONEncoder().encode(prefs)
-            let _ = try await loginBackend.callLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
+            let resp = try await loginBackend.callLocalAPI(method: "PATCH", endpoint: endpoint, body: body)
+            try resp.requireSuccess(endpoint: endpoint)
         } catch {
             lastError = "Failed to update login preferences: \(error.localizedDescription)"
         }
@@ -740,6 +727,7 @@ class AppState: ObservableObject {
         // Also tell Go backend about the preference change
         Task {
             do {
+                let endpoint = "/localapi/v0/prefs"
                 if wantRunning {
                     lastError = nil
                     ipnState = .starting
@@ -756,7 +744,8 @@ class AppState: ObservableObject {
 
                 let prefs = MaskedPrefs.setWantRunning(wantRunning)
                 let body = try JSONEncoder().encode(prefs)
-                let _ = try await vpn.callLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
+                let resp = try await vpn.callLocalAPI(method: "PATCH", endpoint: endpoint, body: body)
+                try resp.requireSuccess(endpoint: endpoint)
 
                 if wantRunning {
                     await refreshTunnelStatus()
@@ -776,16 +765,12 @@ class AppState: ObservableObject {
     /// Fetch the current login profile from the backend.
     func fetchCurrentProfile() {
         guard let vpn = vpnManager else { return }
+        let endpoint = "/localapi/v0/profiles/current"
 
         Task {
             do {
-                let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/profiles/current")
-                if resp.statusCode == 200,
-                   let bodyB64 = resp.bodyBase64,
-                   let bodyData = Data(base64Encoded: bodyB64) {
-                    let profile = try JSONDecoder().decode(LoginProfile.self, from: bodyData)
-                    currentProfile = profile
-                }
+                let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+                currentProfile = try resp.decodedBody(LoginProfile.self, endpoint: endpoint)
             } catch {
                 // Profile fetch is best-effort; don't show error to user
             }
@@ -794,29 +779,21 @@ class AppState: ObservableObject {
 
     private func fetchCurrentProfileFromVPNBackend() async {
         guard let vpn = vpnManager else { return }
+        let endpoint = "/localapi/v0/profiles/current"
 
         do {
-            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: "/localapi/v0/profiles/current")
-            if resp.statusCode == 200,
-               let bodyB64 = resp.bodyBase64,
-               let bodyData = Data(base64Encoded: bodyB64) {
-                let profile = try JSONDecoder().decode(LoginProfile.self, from: bodyData)
-                currentProfile = profile
-            }
+            let resp = try await vpn.callLocalAPI(method: "GET", endpoint: endpoint)
+            currentProfile = try resp.decodedBody(LoginProfile.self, endpoint: endpoint)
         } catch {
             // Profile fetch is best-effort; the tunnel status is authoritative for routing.
         }
     }
 
     private func fetchCurrentProfileFromLoginBackend() async {
+        let endpoint = "/localapi/v0/profiles/current"
         do {
-            let resp = try await loginBackend.callLocalAPI(method: "GET", endpoint: "/localapi/v0/profiles/current")
-            if resp.statusCode == 200,
-               let bodyB64 = resp.bodyBase64,
-               let bodyData = Data(base64Encoded: bodyB64) {
-                let profile = try JSONDecoder().decode(LoginProfile.self, from: bodyData)
-                currentProfile = profile
-            }
+            let resp = try await loginBackend.callLocalAPI(method: "GET", endpoint: endpoint)
+            currentProfile = try resp.decodedBody(LoginProfile.self, endpoint: endpoint)
         } catch {
             // Profile fetch is best-effort; login state has already been saved by the backend.
         }
@@ -855,18 +832,10 @@ class AppState: ObservableObject {
     }
 
     private func loadAwgPeersStatusOnce(showMessages: Bool) async -> Bool {
+        let endpoint = "/localapi/v0/awg-sync-peers"
         do {
-            let resp = try await callActiveLocalAPI(method: "GET", endpoint: "/localapi/v0/awg-sync-peers")
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                if showMessages {
-                    awgStatusMessage = responseErrorMessage(resp)
-                }
-                return false
-            }
-
-            let awgPeers = try JSONDecoder().decode([AwgPeerResult].self, from: bodyData)
+            let resp = try await callActiveLocalAPI(method: "GET", endpoint: endpoint)
+            let awgPeers = try resp.decodedBody([AwgPeerResult].self, endpoint: endpoint)
 
             var statusMap: [String: Bool] = [:]
             var dataMap: [String: AwgPeerResult] = [:]
@@ -905,16 +874,10 @@ class AppState: ObservableObject {
     }
 
     private func loadLocalAwgStatusOnce(showMessages: Bool) async -> Bool {
+        let endpoint = "/localapi/v0/prefs"
         do {
-            let resp = try await callActiveLocalAPI(method: "GET", endpoint: "/localapi/v0/prefs")
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                localAwgStatus = false
-                return false
-            }
-
-            let prefs = try JSONDecoder().decode(LocalPrefs.self, from: bodyData)
+            let resp = try await callActiveLocalAPI(method: "GET", endpoint: endpoint)
+            let prefs = try resp.decodedBody(LocalPrefs.self, endpoint: endpoint)
             currentAwgConfig = prefs.AmneziaWG
             localAwgStatus = currentAwgConfig?.hasNonDefaultValues == true
             return true
@@ -973,21 +936,12 @@ class AppState: ObservableObject {
 
         Task {
             do {
+                let endpoint = "/localapi/v0/awg-sync-apply"
                 let vpn = try await ensureVPNBackendReadyForAwgSync()
                 let request = AwgSyncApplyRequest(nodeKey: nodeKey, timeout: timeout)
                 let body = try JSONEncoder().encode(request)
-                let resp = try await vpn.callLocalAPI(method: "POST", endpoint: "/localapi/v0/awg-sync-apply", body: body)
-
-                guard resp.statusCode == 200,
-                      let bodyB64 = resp.bodyBase64,
-                      let bodyData = Data(base64Encoded: bodyB64) else {
-                    let errMsg = responseErrorMessage(resp)
-                    awgStatusMessage = parseAwgApplyError(errMsg, hostname: hostname)
-                    awgSyncInProgress = nil
-                    return
-                }
-
-                let appliedConfig = try JSONDecoder().decode(AmneziaWGPrefs.self, from: bodyData)
+                let resp = try await vpn.callLocalAPI(method: "POST", endpoint: endpoint, body: body)
+                let appliedConfig = try resp.decodedBody(AmneziaWGPrefs.self, endpoint: endpoint)
                 currentAwgConfig = appliedConfig
                 localAwgStatus = appliedConfig.hasNonDefaultValues
                 awgStatusMessage = "AWG config from \(hostname) applied, restarting VPN..."
@@ -1027,9 +981,7 @@ class AppState: ObservableObject {
             resp = try await callActiveLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
         }
 
-        guard resp.statusCode == 200 else {
-            throw LoginFlowError.localAPI(responseErrorMessage(resp))
-        }
+        try resp.requireSuccess(endpoint: "/localapi/v0/prefs")
 
         currentAwgConfig = config
         localAwgStatus = config.hasNonDefaultValues
@@ -1158,11 +1110,8 @@ class AppState: ObservableObject {
     }
 
     private func responseErrorMessage(_ response: IPCResponse) -> String {
-        if let bodyB64 = response.bodyBase64,
-           let bodyData = Data(base64Encoded: bodyB64),
-           let body = String(data: bodyData, encoding: .utf8),
-           !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return body
+        if let bodyPreview = response.bodyPreview() {
+            return bodyPreview
         }
         return response.error ?? "Unknown error (status \(response.statusCode))"
     }
@@ -1216,15 +1165,13 @@ class AppState: ObservableObject {
     func setExitNode(_ peer: PeerNode) {
         Task {
             do {
+                let endpoint = "/localapi/v0/prefs"
                 var maskedPrefs = MaskedPrefs()
                 maskedPrefs.ExitNodeID = peer.id
                 maskedPrefs.ExitNodeIDSet = true
                 let body = try JSONEncoder().encode(maskedPrefs)
-                let resp = try await callActiveLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
-                guard resp.statusCode == 200 else {
-                    lastError = responseErrorMessage(resp)
-                    return
-                }
+                let resp = try await callActiveLocalAPI(method: "PATCH", endpoint: endpoint, body: body)
+                try resp.requireSuccess(endpoint: endpoint)
                 await refreshPrefsFromActiveBackend()
             } catch {
                 lastError = "Failed to set exit node: \(error.localizedDescription)"
@@ -1236,15 +1183,13 @@ class AppState: ObservableObject {
     func clearExitNode() {
         Task {
             do {
+                let endpoint = "/localapi/v0/prefs"
                 var maskedPrefs = MaskedPrefs()
                 maskedPrefs.ExitNodeID = ""
                 maskedPrefs.ExitNodeIDSet = true
                 let body = try JSONEncoder().encode(maskedPrefs)
-                let resp = try await callActiveLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
-                guard resp.statusCode == 200 else {
-                    lastError = responseErrorMessage(resp)
-                    return
-                }
+                let resp = try await callActiveLocalAPI(method: "PATCH", endpoint: endpoint, body: body)
+                try resp.requireSuccess(endpoint: endpoint)
                 await refreshPrefsFromActiveBackend()
             } catch {
                 lastError = "Failed to clear exit node: \(error.localizedDescription)"
@@ -1256,15 +1201,13 @@ class AppState: ObservableObject {
     func setExitNodeAllowLANAccess(_ allow: Bool) {
         Task {
             do {
+                let endpoint = "/localapi/v0/prefs"
                 var maskedPrefs = MaskedPrefs()
                 maskedPrefs.ExitNodeAllowLANAccess = allow
                 maskedPrefs.ExitNodeAllowLANAccessSet = true
                 let body = try JSONEncoder().encode(maskedPrefs)
-                let resp = try await callActiveLocalAPI(method: "PATCH", endpoint: "/localapi/v0/prefs", body: body)
-                guard resp.statusCode == 200 else {
-                    lastError = responseErrorMessage(resp)
-                    return
-                }
+                let resp = try await callActiveLocalAPI(method: "PATCH", endpoint: endpoint, body: body)
+                try resp.requireSuccess(endpoint: endpoint)
                 await refreshPrefsFromActiveBackend()
             } catch {
                 lastError = "Failed to update LAN access setting: \(error.localizedDescription)"
@@ -1273,14 +1216,10 @@ class AppState: ObservableObject {
     }
 
     private func refreshPrefsFromActiveBackend() async {
+        let endpoint = "/localapi/v0/prefs"
         do {
-            let resp = try await callActiveLocalAPI(method: "GET", endpoint: "/localapi/v0/prefs")
-            guard resp.statusCode == 200,
-                  let bodyB64 = resp.bodyBase64,
-                  let bodyData = Data(base64Encoded: bodyB64) else {
-                return
-            }
-            prefs = try JSONDecoder().decode(IpnPrefs.self, from: bodyData)
+            let resp = try await callActiveLocalAPI(method: "GET", endpoint: endpoint)
+            prefs = try resp.decodedBody(IpnPrefs.self, endpoint: endpoint)
         } catch {
             // Notify updates from the backend will refresh prefs shortly.
         }
