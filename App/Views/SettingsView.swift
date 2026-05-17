@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -105,6 +106,10 @@ struct SettingsView: View {
             Section("Diagnostics") {
                 NavigationLink(destination: BugReportView()) {
                     SettingsRowLabel(title: "Bug Report", systemImage: "ladybug")
+                }
+
+                NavigationLink(destination: NotificationsSettingsView()) {
+                    SettingsRowLabel(title: "Notifications", systemImage: "bell")
                 }
 
                 if let lastError = appState.lastError {
@@ -215,6 +220,7 @@ struct AwgSettingsView: View {
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var statusMessage: String?
+    @State private var jsonText = ""
 
     var body: some View {
         List {
@@ -255,6 +261,35 @@ struct AwgSettingsView: View {
                     Label(errorMessage, systemImage: "exclamationmark.triangle")
                         .foregroundColor(.red)
                 }
+            }
+
+            Section("JSON") {
+                TextEditor(text: $jsonText)
+                    .frame(minHeight: 140)
+                    .font(.system(.caption, design: .monospaced))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+
+                Button {
+                    pasteJSONFromClipboard()
+                } label: {
+                    SettingsRowLabel(title: "Paste JSON", systemImage: "doc.on.clipboard")
+                }
+                .disabled(isSaving || isLoading)
+
+                Button {
+                    applyJSONConfig()
+                } label: {
+                    SettingsRowLabel(title: "Apply JSON Config", systemImage: "curlybraces")
+                }
+                .disabled(isSaving || isLoading || jsonText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Button {
+                    copyCurrentJSON()
+                } label: {
+                    SettingsRowLabel(title: "Copy Current JSON", systemImage: "doc.on.doc")
+                }
+                .disabled(isSaving || isLoading)
             }
 
             Section("Packet Shape") {
@@ -369,6 +404,7 @@ struct AwgSettingsView: View {
         errorMessage = nil
         await appState.refreshLocalAwgStatusNow(showMessages: false)
         loadFields(from: appState.currentAwgConfig)
+        loadJSON(from: appState.currentAwgConfig)
         isLoading = false
     }
 
@@ -380,8 +416,38 @@ struct AwgSettingsView: View {
 
     private func clearConfig() {
         clearFields()
+        jsonText = ""
         Task {
             await applyConfig(.empty)
+        }
+    }
+
+    private func pasteJSONFromClipboard() {
+        #if canImport(UIKit)
+        guard let clipboardText = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !clipboardText.isEmpty else {
+            statusMessage = nil
+            errorMessage = "Clipboard is empty"
+            return
+        }
+        jsonText = clipboardText
+        statusMessage = "Pasted"
+        errorMessage = nil
+        #else
+        errorMessage = "Clipboard is unavailable"
+        statusMessage = nil
+        #endif
+    }
+
+    private func applyJSONConfig() {
+        Task {
+            await applyJSONConfigFromText()
+        }
+    }
+
+    private func copyCurrentJSON() {
+        Task {
+            await copyCurrentConfigJSON()
         }
     }
 
@@ -397,6 +463,46 @@ struct AwgSettingsView: View {
     }
 
     @MainActor
+    private func applyJSONConfigFromText() async {
+        do {
+            let config = try decodeConfigJSON(jsonText)
+            jsonText = try encodeConfigJSON(config)
+            await applyConfig(config)
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = nil
+        }
+    }
+
+    @MainActor
+    private func copyCurrentConfigJSON() async {
+        if appState.currentAwgConfig == nil {
+            await appState.refreshLocalAwgStatusNow(showMessages: false)
+        }
+
+        guard let config = appState.currentAwgConfig, config.hasNonDefaultValues else {
+            statusMessage = nil
+            errorMessage = "No AWG config to copy"
+            return
+        }
+
+        do {
+            let json = try encodeConfigJSON(config)
+            jsonText = json
+            #if canImport(UIKit)
+            UIPasteboard.general.string = json
+            statusMessage = "Copied"
+            #else
+            statusMessage = "Loaded current JSON"
+            #endif
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            statusMessage = nil
+        }
+    }
+
+    @MainActor
     private func applyConfig(_ config: AmneziaWGPrefs) async {
         isSaving = true
         errorMessage = nil
@@ -405,6 +511,7 @@ struct AwgSettingsView: View {
         do {
             try await appState.applyManualAwgConfig(config)
             loadFields(from: appState.currentAwgConfig)
+            loadJSON(from: appState.currentAwgConfig)
             statusMessage = config.hasNonDefaultValues ? "Saved" : "Cleared"
         } catch {
             errorMessage = error.localizedDescription
@@ -434,6 +541,29 @@ struct AwgSettingsView: View {
         )
     }
 
+    private func decodeConfigJSON(_ text: String) throws -> AmneziaWGPrefs {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw AwgSettingsError("JSON input is empty") }
+        let data = Data(trimmed.utf8)
+        let decoder = JSONDecoder()
+
+        do {
+            return try decoder.decode(AmneziaWGPrefs.self, from: data)
+        } catch {
+            if let wrapped = try? decoder.decode(AwgConfigJSONWrapper.self, from: data), let config = wrapped.AmneziaWG {
+                return config
+            }
+            throw AwgSettingsError("Invalid JSON: \(error.localizedDescription)")
+        }
+    }
+
+    private func encodeConfigJSON(_ config: AmneziaWGPrefs) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(config)
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
     private func loadFields(from config: AmneziaWGPrefs?) {
         jc = text(config?.JC)
         jMin = text(config?.JMin)
@@ -455,6 +585,14 @@ struct AwgSettingsView: View {
         h3Max = text(config?.H3?.max)
         h4Min = text(config?.H4?.min)
         h4Max = text(config?.H4?.max)
+    }
+
+    private func loadJSON(from config: AmneziaWGPrefs?) {
+        guard let config, config.hasNonDefaultValues, let json = try? encodeConfigJSON(config) else {
+            jsonText = ""
+            return
+        }
+        jsonText = json
     }
 
     private func clearFields() {
@@ -511,6 +649,10 @@ struct AwgSettingsView: View {
     }
 }
 
+private struct AwgConfigJSONWrapper: Decodable {
+        let AmneziaWG: AmneziaWGPrefs?
+}
+
 private struct AwgSettingsError: LocalizedError {
     let message: String
 
@@ -519,4 +661,79 @@ private struct AwgSettingsError: LocalizedError {
     }
 
     var errorDescription: String? { message }
+}
+
+private struct NotificationsSettingsView: View {
+    @StateObject private var notifications = NotificationManager.shared
+
+    private var statusText: String {
+        switch notifications.authorizationStatus {
+        case .notDetermined:
+            return "Not Requested"
+        case .denied:
+            return "Off"
+        case .authorized:
+            return "On"
+        case .provisional:
+            return "Provisional"
+        case .ephemeral:
+            return "Temporary"
+        @unknown default:
+            return "Unknown"
+        }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                HStack {
+                    SettingsRowLabel(title: "Notification Permission", systemImage: "bell.badge")
+                    Spacer()
+                    Text(statusText)
+                        .foregroundColor(notifications.isAuthorized ? .green : .secondary)
+                }
+
+                Button {
+                    Task {
+                        if notifications.authorizationStatus == .notDetermined {
+                            _ = await notifications.requestAuthorization()
+                        } else {
+                            openAppNotificationSettings()
+                        }
+                        await notifications.checkAuthorizationStatus()
+                    }
+                } label: {
+                    HStack {
+                        SettingsIcon(systemImage: notifications.authorizationStatus == .notDetermined ? "checkmark.circle" : "gearshape", color: .accentColor)
+                        Text(notifications.authorizationStatus == .notDetermined ? "Allow Notifications" : "Open System Settings")
+                    }
+                }
+            } footer: {
+                Text("Notifications are used for Taildrop files, key expiry reminders, and high-severity health warnings.")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    notifications.clearAllNotifications()
+                } label: {
+                    HStack {
+                        SettingsIcon(systemImage: "xmark.circle", color: .red)
+                        Text("Clear Notifications")
+                    }
+                }
+            }
+        }
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await notifications.checkAuthorizationStatus()
+        }
+    }
+
+    private func openAppNotificationSettings() {
+        #if canImport(UIKit)
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+        #endif
+    }
 }

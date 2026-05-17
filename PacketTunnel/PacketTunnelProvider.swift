@@ -56,7 +56,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         logger.log("startTunnel: beginning")
-        logger.notice("runtime marker awgscale=0.1.6 build=7 recovery=official-soft-refresh-fast30-cd60 refactor=dns-subnet-tka")
+        logger.notice("runtime marker awgscale=0.1.7 build=8 recovery=official-soft-refresh-fast30-cd60 refactor=dns-subnet-tka-advertise-routes-mullvad-notifications")
         resetTunnelLifecycleState()
         sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
         sharedDefaults?.set(false, forKey: IPCConstants.keyTunnelHasDefaultRoute)
@@ -321,12 +321,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             } catch {
                 let durationMillis = Int(Date().timeIntervalSince(startedAt) * 1000)
                 logger.error("LocalAPI failed method=\(method, privacy: .public) endpoint=\(endpoint, privacy: .public) durationMs=\(durationMillis, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-                sharedDefaults?.set(error.localizedDescription, forKey: IPCConstants.keyLastError)
-                postDarwinNotification(IPCConstants.notifyStateChanged)
+                if shouldPublishLocalAPIError(endpoint: endpoint) {
+                    publishLastError(error.localizedDescription)
+                }
                 let resp = IPCResponse.failure(error.localizedDescription)
                 completionHandler?(try? JSONEncoder().encode(resp))
             }
         }
+    }
+
+    private func shouldPublishLocalAPIError(endpoint: String) -> Bool {
+        !endpoint.hasPrefix("/localapi/v0/ping")
     }
 
     private func logLocalAPICompletionIfUseful(method: String, endpoint: String, statusCode: Int, startedAt: Date) {

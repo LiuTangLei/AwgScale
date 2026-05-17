@@ -158,7 +158,7 @@ struct PeerDetailView: View {
             }
             
             // Diagnostics section
-            if !peer.isCurrentDevice && peer.online {
+            if !peer.isCurrentDevice && peer.primaryIPv4Address != nil {
                 Section {
                     NavigationLink {
                         PingView(peer: peer)
@@ -315,8 +315,11 @@ struct PingView: View {
     @State private var isPinging: Bool = false
     @State private var pingCount: Int = 0
     @State private var pingTask: Task<Void, Never>?
+    @State private var pingRunID: UUID?
 
-    private let maxSamples = 60
+    private let maxSamples = 30
+    private let maxPingCount = 30
+    private let pingTimeoutMillis = 5_000
     
     var body: some View {
         List {
@@ -400,15 +403,17 @@ struct PingView: View {
         pingResults = []
         pingCount = 0
         pingTask?.cancel()
+        let runID = UUID()
+        pingRunID = runID
 
         pingTask = Task {
             var seq = 0
-            while !Task.isCancelled {
+            while !Task.isCancelled && seq < maxPingCount {
                 seq += 1
 
                 do {
                     let canContinue = await MainActor.run {
-                        canStartPing(vpn: vpn)
+                        canContinuePing(vpn: vpn)
                     }
                     guard canContinue else {
                         await MainActor.run {
@@ -418,10 +423,11 @@ struct PingView: View {
                         break
                     }
 
-                    let result = try await pingWithTransientRetry(vpn: vpn, ip: targetIP)
+                    let result = try await LocalAPIClient.vpn(vpn).ping(ip: targetIP, timeout: pingTimeoutMillis)
+                    if Task.isCancelled { break }
                     if let error = result.Err, !error.isEmpty {
                         await MainActor.run {
-                            appendPingResult(PingResult(seq: seq, error: error))
+                            appendPingResult(PingResult(seq: seq, error: normalizePingError(error)))
                         }
                     } else if let latency = result.LatencySeconds {
                         await MainActor.run {
@@ -433,38 +439,32 @@ struct PingView: View {
                         }
                     }
                 } catch {
+                    if Task.isCancelled { break }
                     await MainActor.run {
-                        appendPingResult(PingResult(seq: seq, error: error.localizedDescription))
+                        appendPingResult(PingResult(seq: seq, error: normalizePingError(error.localizedDescription)))
                     }
                 }
 
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    break
+                }
             }
 
             await MainActor.run {
+                guard pingRunID == runID else { return }
                 isPinging = false
                 pingTask = nil
+                pingRunID = nil
             }
         }
-    }
-
-    private func pingWithTransientRetry(vpn: VPNManager, ip: String) async throws -> PingAPIResponse {
-        do {
-            return try await LocalAPIClient.vpn(vpn).ping(ip: ip)
-        } catch {
-            guard isTransientPingTimeout(error) else { throw error }
-            try await Task.sleep(nanoseconds: 1_000_000_000)
-            return try await LocalAPIClient.vpn(vpn).ping(ip: ip, timeout: 15000)
-        }
-    }
-
-    private func isTransientPingTimeout(_ error: Error) -> Bool {
-        error.localizedDescription.lowercased().contains("timeout")
     }
 
     private func stopPing() {
         pingTask?.cancel()
         pingTask = nil
+        pingRunID = nil
         isPinging = false
     }
 
@@ -481,6 +481,18 @@ struct PingView: View {
             && !appState.isUpdatingExitNode
             && appState.ipnState == .running
             && vpn.isTunnelActive
+    }
+
+    private func canContinuePing(vpn: VPNManager) -> Bool {
+        appState.pendingWantRunning != false && vpn.isTunnelActive
+    }
+
+    private func normalizePingError(_ message: String) -> String {
+        let lowercased = message.lowercased()
+        if lowercased.contains("timeout") || lowercased.contains("timed out") {
+            return "Timed out"
+        }
+        return message
     }
 
     private func latencyColor(_ ms: Double) -> Color {

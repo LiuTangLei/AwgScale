@@ -19,9 +19,18 @@ struct ExitNodeView: View {
     private var filteredExitNodes: [PeerNode] {
         guard !searchText.isEmpty else { return exitNodePeers }
         return exitNodePeers.filter { peer in
+            peer.exitNodeDisplayName.localizedCaseInsensitiveContains(searchText) ||
             peer.displayName.localizedCaseInsensitiveContains(searchText) ||
             peer.addresses.contains { $0.contains(searchText) }
         }
+    }
+
+    private var tailnetExitNodes: [PeerNode] {
+        filteredExitNodes.filter { !$0.isMullvadNode }
+    }
+
+    private var mullvadExitNodes: [PeerNode] {
+        filteredExitNodes.filter { $0.isMullvadNode }
     }
     
     /// Currently selected exit node ID.
@@ -109,22 +118,26 @@ struct ExitNodeView: View {
                         Text("No matching exit nodes")
                             .foregroundColor(.secondary)
                     }
+                } else if tailnetExitNodes.isEmpty {
+                    Text("No tailnet exit nodes match")
+                        .foregroundColor(.secondary)
                 } else {
-                    ForEach(filteredExitNodes) { peer in
-                        ExitNodeRow(
-                            peer: peer,
-                            isSelected: peer.id == currentExitNodeID,
-                            isUpdating: appState.isUpdatingExitNode && appState.pendingExitNodeID == peer.id,
-                            isDisabled: appState.isUpdatingExitNode,
-                            onSelect: {
-                                appState.setExitNode(peer)
-                                dismiss()
-                            }
-                        )
+                    ForEach(tailnetExitNodes) { peer in
+                        exitNodeRow(peer)
                     }
                 }
             } header: {
-                Text("Available Exit Nodes")
+                Text("Tailnet Exit Nodes")
+            }
+
+            if !mullvadExitNodes.isEmpty {
+                Section {
+                    ForEach(mullvadExitNodes) { peer in
+                        exitNodeRow(peer)
+                    }
+                } header: {
+                    Text("Mullvad Exit Nodes")
+                }
             }
             
             // Note: iOS does not support running as an exit node.
@@ -133,6 +146,19 @@ struct ExitNodeView: View {
         .searchable(text: $searchText, prompt: "Search exit nodes")
         .navigationTitle("Exit Node")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func exitNodeRow(_ peer: PeerNode) -> some View {
+        ExitNodeRow(
+            peer: peer,
+            isSelected: peer.id == currentExitNodeID,
+            isUpdating: appState.isUpdatingExitNode && appState.pendingExitNodeID == peer.id,
+            isDisabled: appState.isUpdatingExitNode,
+            onSelect: {
+                appState.setExitNode(peer)
+                dismiss()
+            }
+        )
     }
 }
 
@@ -152,9 +178,14 @@ struct ExitNodeRow: View {
                         Circle()
                             .fill(peer.online ? Color.green : Color.gray)
                             .frame(width: 8, height: 8)
-                        Text(peer.displayName)
+                        Text(peer.exitNodeDisplayName)
                             .font(.body)
                             .foregroundColor(.primary)
+                    }
+                    if peer.isMullvadNode && peer.exitNodeDisplayName != peer.displayName {
+                        Text(peer.displayName)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                     if let addr = peer.addresses.first {
                         Text(addr)

@@ -1,11 +1,11 @@
 module github.com/LiuTangLei/awgscale-ios
 
-go 1.26.2
+go 1.26.3
 
 require (
 	github.com/LiuTangLei/wireguard-go v0.0.20
 	golang.org/x/mobile v0.0.0-20260312152759-81488f6aeb60
-	tailscale.com v1.98.1
+	tailscale.com v1.98.2
 )
 
 require (
@@ -52,4 +52,4 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )
 
-replace tailscale.com => github.com/LiuTangLei/tailscale v1.98.1
+replace tailscale.com => github.com/LiuTangLei/tailscale v1.98.2

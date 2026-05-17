@@ -18,6 +18,10 @@ struct MainView: View {
         appState.effectiveVPNIsActive(systemActive: vpnManager.isTunnelActive)
     }
 
+    private var visiblePeers: [PeerNode] {
+        appState.peers.filter { !$0.isMullvadNode }
+    }
+
     private var connectionTitle: String {
         if let pending = appState.pendingWantRunning {
             return pending ? "Connecting" : "Disconnecting"
@@ -141,11 +145,11 @@ struct MainView: View {
 
                 // Peer list
                 Section("Devices") {
-                    if appState.peers.isEmpty {
+                    if visiblePeers.isEmpty {
                         Text("No other devices found")
                             .foregroundColor(.secondary)
                     }
-                    ForEach(appState.peers, id: \.id) { peer in
+                    ForEach(visiblePeers, id: \.id) { peer in
                         NavigationLink(destination: PeerDetailView(peer: peer)) {
                             PeerRow(peer: peer, appState: appState)
                         }

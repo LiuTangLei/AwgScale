@@ -55,6 +55,7 @@ struct IpnPrefs: Codable {
     let WantRunning: Bool?
     var RouteAll: Bool? = nil
     var CorpDNS: Bool? = nil
+    var AdvertiseRoutes: [String]? = nil
     var AmneziaWG: AmneziaWGPrefs? = nil
     let ExitNodeID: String?
     let ExitNodeAllowLANAccess: Bool?
@@ -109,6 +110,8 @@ struct MaskedPrefs: Codable {
     var RouteAllSet: Bool?
     var CorpDNS: Bool?
     var CorpDNSSet: Bool?
+    var AdvertiseRoutes: [String]?
+    var AdvertiseRoutesSet: Bool?
     var ExitNodeID: String?
     var ExitNodeIDSet: Bool?
     var ExitNodeAllowLANAccess: Bool?
@@ -126,6 +129,11 @@ struct MaskedPrefs: Codable {
     /// Helper to set a custom control server URL.
     static func setControlURL(_ url: String) -> MaskedPrefs {
         MaskedPrefs(ControlURL: url, ControlURLSet: true)
+    }
+
+    /// Helper to set local subnet routes advertised by this device.
+    static func setAdvertiseRoutes(_ routes: [String]) -> MaskedPrefs {
+        MaskedPrefs(AdvertiseRoutes: routes, AdvertiseRoutesSet: true)
     }
 
     /// Helper to set or clear the local AWG configuration.
@@ -173,6 +181,19 @@ struct NetworkMap: Codable {
 
     struct HostinfoData: Codable {
         let Hostname: String?
+        let Location: LocationData?
+
+        init(Hostname: String?, Location: LocationData? = nil) {
+            self.Hostname = Hostname
+            self.Location = Location
+        }
+
+        struct LocationData: Codable {
+            let Country: String?
+            let CountryCode: String?
+            let City: String?
+            let CityCode: String?
+        }
     }
 
     struct NodeData: Codable, Identifiable {
@@ -331,6 +352,8 @@ struct PeerNode: Identifiable {
     let userDisplayName: String?
     let keyExpiry: String?
     let isExitNode: Bool
+    let isMullvadNode: Bool
+    let exitNodeDisplayName: String
     let allowedIPs: [String]
     let computedName: String?
     let hostinfoHostname: String?
@@ -362,6 +385,21 @@ struct PeerNode: Identifiable {
         }
     }
 
+    private static func isMullvadNode(_ node: NetworkMap.NodeData) -> Bool {
+        if node.Hostinfo?.Location != nil { return true }
+        return [node.Name, node.ComputedName].contains { name in
+            name?.hasSuffix(".mullvad.ts.net") == true
+        }
+    }
+
+    private static func exitNodeDisplayName(from node: NetworkMap.NodeData, fallback: String) -> String {
+        guard isMullvadNode(node),
+              let location = node.Hostinfo?.Location,
+              let country = location.Country,
+              let city = location.City else { return fallback }
+        return "\(country): \(city)"
+    }
+
     init(from node: NetworkMap.NodeData, isSelf: Bool, userProfile: LoginProfile.UserProfile?) {
         self.id = node.id
         self.nodeKey = node.Key
@@ -377,5 +415,7 @@ struct PeerNode: Identifiable {
         self.computedName = node.ComputedName
         self.hostinfoHostname = node.Hostinfo?.Hostname
         self.isExitNode = Self.isExitNode(node)
+        self.isMullvadNode = Self.isMullvadNode(node)
+        self.exitNodeDisplayName = Self.exitNodeDisplayName(from: node, fallback: self.displayName)
     }
 }

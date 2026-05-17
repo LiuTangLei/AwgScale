@@ -18,7 +18,7 @@ cd "$SCRIPT_DIR"
 
 SCHEME="AwgScale"
 PROJECT="AwgScale.xcodeproj"
-CONFIGURATION="Debug"
+CONFIGURATION="Release"
 SDK="iphoneos"
 OUTPUT_IPA_REL="build/unsigned-ipa/AwgScale-trollstore.ipa"
 DERIVED_DATA_REL="build/unsigned-ipa/DerivedData"
@@ -37,7 +37,7 @@ TrollStore error 173 means ldid is missing in TrollStore Settings.
 Options:
     --scheme NAME           Xcode scheme to build (default: AwgScale)
     --project PATH          Xcode project path relative to project root (default: AwgScale.xcodeproj)
-    --configuration NAME    Build configuration (default: Debug)
+    --configuration NAME    Build configuration (default: Release)
     --out PATH              Output IPA path relative to project root or absolute path
     --derived-data PATH     DerivedData path relative to project root or absolute path
   --team-id ID            Fake team ID for ad-hoc entitlements (default: TROLLSTORE)

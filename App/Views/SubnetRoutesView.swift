@@ -1,15 +1,19 @@
 import SwiftUI
+import Darwin
 
 /// Subnet Routes management view.
-/// Displays routes advertised by other devices on the network.
-/// Note: iOS cannot advertise subnet routes, only use routes from other devices.
+/// Displays routes advertised by peers and routes advertised by this device.
 struct SubnetRoutesView: View {
     @EnvironmentObject var appState: AppState
     @State private var routes: [SubnetRoute] = []
+    @State private var advertisedRoutes: [String] = []
+    @State private var advertisedRouteInput: String = ""
     @State private var useSubnetRoutes: Bool = true
     @State private var isLoading: Bool = true
     @State private var isSavingSubnetPreference: Bool = false
+    @State private var isSavingAdvertisedRoutes: Bool = false
     @State private var error: String?
+    @State private var advertisedRouteError: String?
     
     var body: some View {
         List {
@@ -43,6 +47,56 @@ struct SubnetRoutesView: View {
                     .disabled(isSavingSubnetPreference)
                 } footer: {
                     Text("Route traffic for approved subnet routes through your tailnet.")
+                }
+
+                Section {
+                    if advertisedRoutes.isEmpty {
+                        Text("No local subnet routes advertised")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(advertisedRoutes, id: \.self) { route in
+                            HStack {
+                                Text(route)
+                                    .font(.system(.body, design: .monospaced))
+                                Spacer()
+                                Button(role: .destructive) {
+                                    deleteAdvertisedRoute(route)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .disabled(isSavingAdvertisedRoutes)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        TextField("192.168.1.0/24", text: $advertisedRouteInput)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.body, design: .monospaced))
+                            .disabled(isSavingAdvertisedRoutes)
+
+                        Button {
+                            addAdvertisedRoute()
+                        } label: {
+                            if isSavingAdvertisedRoutes {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "plus.circle.fill")
+                            }
+                        }
+                        .disabled(isSavingAdvertisedRoutes || advertisedRouteInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    if let advertisedRouteError {
+                        Label(advertisedRouteError, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                } header: {
+                    Text("Advertise Routes")
+                } footer: {
+                    Text("Advertise local LAN prefixes from this device. Exit-node default routes are configured separately.")
                 }
 
                 if routes.isEmpty {
@@ -105,7 +159,7 @@ struct SubnetRoutesView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("About Subnet Routes")
                             .font(.subheadline)
-                        Text("iOS devices can use subnet routes advertised by other devices (Linux, macOS, Windows) but cannot advertise their own routes.")
+                        Text("Subnet routes can be used from other devices or advertised from this device after admin approval.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -143,6 +197,7 @@ struct SubnetRoutesView: View {
             let status = try await client.status()
             let prefs = try? await client.ipnPrefs()
             let routeAll = prefs?.RouteAll ?? true
+            let localAdvertisedRoutes = prefs?.AdvertiseRoutes ?? []
 
             for (peerID, peer) in status.Peer ?? [:] {
                 for route in peer.PrimaryRoutes ?? [] where SubnetRoute.isSubnetRoute(route) {
@@ -159,24 +214,8 @@ struct SubnetRoutesView: View {
                 }
             }
 
-            if allRoutes.isEmpty {
-                for (peerID, peer) in status.Peer ?? [:] {
-                    for route in peer.AllowedIPs ?? [] where SubnetRoute.isSubnetRoute(route) {
-                        allRoutes.append(SubnetRoute(
-                            id: "\(peerID)-\(route)",
-                            cidr: route,
-                            advertisedBy: peer.displayName,
-                            approved: true,
-                            enabled: routeAll,
-                            online: peer.Online ?? false,
-                            active: peer.Active ?? false,
-                            os: peer.OS
-                        ))
-                    }
-                }
-            }
-            
             useSubnetRoutes = routeAll
+            advertisedRoutes = localAdvertisedRoutes.sorted()
             routes = allRoutes.sorted {
                 if $0.cidr == $1.cidr { return $0.advertisedBy < $1.advertisedBy }
                 return $0.cidr < $1.cidr
@@ -209,6 +248,49 @@ struct SubnetRoutesView: View {
                     routes = previousRoutes
                     self.error = "Failed to update subnet route preference: \(error.localizedDescription)"
                     isSavingSubnetPreference = false
+                }
+            }
+        }
+    }
+
+    private func addAdvertisedRoute() {
+        do {
+            let route = try SubnetRoute.normalizedAdvertisedRoute(advertisedRouteInput)
+            guard !advertisedRoutes.contains(route) else {
+                advertisedRouteError = "This route is already advertised."
+                return
+            }
+            saveAdvertisedRoutes((advertisedRoutes + [route]).sorted())
+            advertisedRouteInput = ""
+            advertisedRouteError = nil
+        } catch {
+            advertisedRouteError = error.localizedDescription
+        }
+    }
+
+    private func deleteAdvertisedRoute(_ route: String) {
+        saveAdvertisedRoutes(advertisedRoutes.filter { $0 != route })
+    }
+
+    private func saveAdvertisedRoutes(_ newRoutes: [String]) {
+        guard !isSavingAdvertisedRoutes, let vpn = appState.vpnManager else { return }
+        let previous = advertisedRoutes
+        advertisedRoutes = newRoutes
+        isSavingAdvertisedRoutes = true
+
+        Task {
+            do {
+                try await LocalAPIClient.vpn(vpn).setAdvertiseRoutes(newRoutes)
+                await MainActor.run {
+                    isSavingAdvertisedRoutes = false
+                    advertisedRouteError = nil
+                    error = nil
+                }
+            } catch {
+                await MainActor.run {
+                    advertisedRoutes = previous
+                    advertisedRouteError = "Failed to save advertised routes: \(error.localizedDescription)"
+                    isSavingAdvertisedRoutes = false
                 }
             }
         }
@@ -311,10 +393,55 @@ struct SubnetRoute: Identifiable {
         let route = route.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !route.isEmpty,
               route != "0.0.0.0/0",
-              route != "::/0",
-              !route.hasPrefix("100.64.") else { return false }
+              route != "::/0" else { return false }
         return route.contains("/")
     }
+
+    static func normalizedAdvertisedRoute(_ value: String) throws -> String {
+        let route = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = route.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              !parts[0].isEmpty,
+              let bits = Int(parts[1]) else {
+            throw SubnetRouteValidationError("Enter a CIDR route like 192.168.1.0/24.")
+        }
+
+        let address = String(parts[0])
+        if address.contains(":") {
+            guard (0...128).contains(bits), isValidIP(address, family: AF_INET6) else {
+                throw SubnetRouteValidationError("Enter a valid IPv6 CIDR route.")
+            }
+        } else {
+            guard (0...32).contains(bits), isValidIP(address, family: AF_INET) else {
+                throw SubnetRouteValidationError("Enter a valid IPv4 CIDR route.")
+            }
+        }
+
+        let normalized = "\(address)/\(bits)"
+        guard normalized != "0.0.0.0/0", normalized != "::/0" else {
+            throw SubnetRouteValidationError("Exit-node default routes are configured separately.")
+        }
+        return normalized
+    }
+
+    private static func isValidIP(_ address: String, family: Int32) -> Bool {
+        if family == AF_INET {
+            var ipv4 = in_addr()
+            return address.withCString { inet_pton(AF_INET, $0, &ipv4) == 1 }
+        }
+        var ipv6 = in6_addr()
+        return address.withCString { inet_pton(AF_INET6, $0, &ipv6) == 1 }
+    }
+}
+
+private struct SubnetRouteValidationError: LocalizedError {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? { message }
 }
 
 #Preview {

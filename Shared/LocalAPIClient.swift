@@ -116,6 +116,10 @@ struct LocalAPIClient {
         try await patchPrefs(prefs, timeout: timeout)
     }
 
+    func setAdvertiseRoutes(_ routes: [String], timeout: Int = 30000) async throws {
+        try await patchPrefs(.setAdvertiseRoutes(routes), timeout: timeout)
+    }
+
     func setExitNode(id: String, timeout: Int = 30000) async throws {
         var prefs = MaskedPrefs()
         prefs.ExitNodeID = id
