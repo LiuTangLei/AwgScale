@@ -182,10 +182,18 @@ struct NetworkMap: Codable {
     struct HostinfoData: Codable {
         let Hostname: String?
         let Location: LocationData?
+        let sshHostKeys: [String]?
 
-        init(Hostname: String?, Location: LocationData? = nil) {
+        enum CodingKeys: String, CodingKey {
+            case Hostname
+            case Location
+            case sshHostKeys
+        }
+
+        init(Hostname: String?, Location: LocationData? = nil, sshHostKeys: [String]? = nil) {
             self.Hostname = Hostname
             self.Location = Location
+            self.sshHostKeys = sshHostKeys
         }
 
         struct LocationData: Codable {
@@ -357,6 +365,7 @@ struct PeerNode: Identifiable {
     let allowedIPs: [String]
     let computedName: String?
     let hostinfoHostname: String?
+    let sshHostKeys: [String]
 
     private static func displayName(from name: String?) -> String {
         guard let name = name, !name.isEmpty else { return "Unknown" }
@@ -375,6 +384,19 @@ struct PeerNode: Identifiable {
         addresses
             .compactMap { $0.components(separatedBy: "/").first }
             .first { $0.contains(".") }
+    }
+
+    var advertisesTailscaleSSH: Bool {
+        !sshHostKeys.isEmpty
+    }
+
+    var sshTargetHost: String {
+        if !hostname.isEmpty { return hostname }
+        return primaryIPv4Address ?? addresses.first?.components(separatedBy: "/").first ?? ""
+    }
+
+    var sshCapabilityLabel: String {
+        advertisesTailscaleSSH ? "Tailscale SSH advertised" : "Try port 22"
     }
 
     private static func isExitNode(_ node: NetworkMap.NodeData) -> Bool {
@@ -414,6 +436,7 @@ struct PeerNode: Identifiable {
         self.allowedIPs = node.AllowedIPs ?? []
         self.computedName = node.ComputedName
         self.hostinfoHostname = node.Hostinfo?.Hostname
+        self.sshHostKeys = node.Hostinfo?.sshHostKeys ?? []
         self.isExitNode = Self.isExitNode(node)
         self.isMullvadNode = Self.isMullvadNode(node)
         self.exitNodeDisplayName = Self.exitNodeDisplayName(from: node, fallback: self.displayName)

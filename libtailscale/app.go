@@ -44,6 +44,7 @@ type App struct {
 	dataDir        string
 	directFileRoot string
 	appCtx         AppContext
+	appLogin       bool
 	cancel         context.CancelFunc
 	stopOnce       sync.Once
 	mu             sync.Mutex
@@ -53,20 +54,28 @@ type App struct {
 	policyStore       *syspolicyStore
 	logIDPublicAtomic atomic.Pointer[logid.PublicID]
 
-	localAPIHandler http.Handler
-	backend         *ipnlocal.LocalBackend
-	backendState    *backend // prevent GC; logIDPublicAtomic points into this
-	ready           chan struct{}
-	readyOnce       sync.Once
-	readyErr        error
-	packetCallback  PacketCallback
-	tunnelConfigMgr tunnelConfigManager
+	localAPIHandler    http.Handler
+	backend            *ipnlocal.LocalBackend
+	backendState       *backend // prevent GC; logIDPublicAtomic points into this
+	ready              chan struct{}
+	readyOnce          sync.Once
+	readyErr           error
+	packetCallback     PacketCallback
+	tunnelConfigMgr    tunnelConfigManager
+	sshMu              sync.Mutex
+	sshSessions        map[string]*inAppSSHSession
+	inAppProxyMu       sync.Mutex
+	inAppProxyListener net.Listener
+	inAppProxyBackend  *backend
+	inAppProxyHost     string
+	inAppProxyPort     int
 }
 
 type backend struct {
 	engine      wgengine.Engine
 	backend     *ipnlocal.LocalBackend
 	sys         *tsd.System
+	netstack    *netstack.Impl
 	tunDev      *pendingTUN
 	netMon      *netmon.Monitor
 	logIDPublic logid.PublicID
@@ -96,17 +105,19 @@ func start(dataDir, directFileRoot string, hwAttestationPref bool, disableInterf
 		os.Setenv("HOME", dataDir)
 	}
 
-	return newApp(dataDir, directFileRoot, hwAttestationPref, appCtx)
+	return newApp(dataDir, directFileRoot, hwAttestationPref, disableInterfaceBinding, appCtx)
 }
 
-func newApp(dataDir, directFileRoot string, hwAttestationPref bool, appCtx AppContext) *App {
+func newApp(dataDir, directFileRoot string, hwAttestationPref bool, appLogin bool, appCtx AppContext) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		dataDir:        dataDir,
 		directFileRoot: directFileRoot,
 		appCtx:         appCtx,
+		appLogin:       appLogin,
 		cancel:         cancel,
 		ready:          make(chan struct{}),
+		sshSessions:    make(map[string]*inAppSSHSession),
 	}
 
 	a.store = newStateStore(appCtx)
@@ -174,7 +185,7 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 	h := localapi.NewHandler(hc)
 	h.PermitRead = true
 	h.PermitWrite = true
-	a.localAPIHandler = h
+	a.localAPIHandler = a.withInAppToolsHandler(h, b)
 
 	<-ctx.Done()
 	return ctx.Err()
@@ -255,7 +266,8 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 		return nil, fmt.Errorf("netstack.Create: %w", err)
 	}
 	sys.Set(ns)
-	ns.ProcessLocalIPs = false // let NetworkExtension packetFlow feed local-IP traffic through WireGuard
+	b.netstack = ns
+	ns.ProcessLocalIPs = a.appLogin // app-only has no NetworkExtension packetFlow to feed local-IP traffic
 	ns.ProcessSubnets = true
 	// In-process clients (PeerAPI server, PeerAPI outbound dials via UseNetstackForIP)
 	// register gVisor TCP/UDP endpoints on our local Tailnet IPs. Without this flag,
@@ -574,6 +586,8 @@ func (a *App) Stop() {
 		if cancel != nil {
 			cancel()
 		}
+		a.closeInAppSSHSessions()
+		a.closeInAppBrowserProxy()
 		a.markReady(context.Canceled)
 		if backendState != nil {
 			a.closeBackendState(backendState)

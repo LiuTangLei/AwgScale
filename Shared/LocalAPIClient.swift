@@ -124,6 +124,8 @@ struct LocalAPIClient {
         var prefs = MaskedPrefs()
         prefs.ExitNodeID = id
         prefs.ExitNodeIDSet = true
+        prefs.RouteAll = !id.isEmpty
+        prefs.RouteAllSet = true
         try await patchPrefs(prefs, timeout: timeout)
     }
 

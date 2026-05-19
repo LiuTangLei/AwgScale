@@ -17,6 +17,10 @@ struct SettingsView: View {
         appState.localAwgStatus ? .green : .secondary
     }
 
+    private var modeSwitchDisabled: Bool {
+        appState.pendingWantRunning != nil || vpnManager.isTunnelActive || (!appState.usesVPNPermission && appState.appNetworkIsActive)
+    }
+
     var body: some View {
         List {
             Section("Account") {
@@ -40,14 +44,33 @@ struct SettingsView: View {
                 }
             }
 
+              Section {
+                  Toggle(isOn: Binding(
+                      get: { appState.usesVPNPermission },
+                      set: { appState.setUsesVPNPermission($0) }
+                  )) {
+                      SettingsRowLabel(title: "Enable VPN Permission", systemImage: "shield.lefthalf.filled")
+                  }
+                  .disabled(modeSwitchDisabled)
+              } header: {
+                  Text("Connection Mode")
+              } footer: {
+                  Text(appState.usesVPNPermission ? "System-wide VPN mode keeps the original behavior." : "App-only mode keeps tailnet traffic inside AwgScale.")
+              }
+
             Section("Network") {
-                NavigationLink(destination: DNSSettingsView()) {
-                    SettingsRowLabel(title: "DNS Settings", systemImage: "network")
-                }
-                
-                NavigationLink(destination: SubnetRoutesView()) {
-                    SettingsRowLabel(title: "Subnet Routes", systemImage: "network")
-                }
+                  if appState.usesVPNPermission {
+                      NavigationLink(destination: DNSSettingsView()) {
+                          SettingsRowLabel(title: "DNS Settings", systemImage: "network")
+                      }
+
+                      NavigationLink(destination: SubnetRoutesView()) {
+                          SettingsRowLabel(title: "Subnet Routes", systemImage: "network")
+                      }
+                  } else {
+                      DisabledSettingsRow(title: "DNS Settings", systemImage: "network")
+                      DisabledSettingsRow(title: "Subnet Routes", systemImage: "network")
+                  }
             }
 
             Section("Files") {
@@ -73,9 +96,9 @@ struct SettingsView: View {
                         .font(.caption)
                 }
 
-                NavigationLink(destination: AwgSettingsView()) {
-                    SettingsRowLabel(title: "Configuration", systemImage: "slider.horizontal.3", color: .orange)
-                }
+                  NavigationLink(destination: AwgSettingsView()) {
+                      SettingsRowLabel(title: "Configuration", systemImage: "slider.horizontal.3", color: .orange)
+                  }
 
                 Button {
                     appState.refreshAwgStatus()
@@ -90,7 +113,7 @@ struct SettingsView: View {
                         Text(appState.isAwgStatusRefreshing ? "Refreshing AWG Status" : "Refresh AWG Status")
                     }
                 }
-                .disabled(appState.isAwgStatusRefreshing)
+                  .disabled(appState.isAwgStatusRefreshing)
             }
 
             Section("Security") {
@@ -190,6 +213,24 @@ private struct SettingsRowLabel: View {
             SettingsIcon(systemImage: systemImage, color: color)
             Text(title)
         }
+    }
+}
+
+private struct DisabledSettingsRow: View {
+    let title: String
+    let systemImage: String
+    var color: Color = .accentColor
+
+    var body: some View {
+        HStack {
+            SettingsRowLabel(title: title, systemImage: systemImage, color: color)
+            Spacer()
+            Text("VPN required")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .foregroundColor(.secondary)
+        .opacity(0.55)
     }
 }
 
