@@ -16,7 +16,9 @@ struct InAppToolsView: View {
         List {
             if BrowserRuntime.supportsLiveProxy {
                 Section {
-                    NavigationLink(destination: ExitNodeView()) {
+                    Button {
+                        appState.presentInAppExitNodePicker()
+                    } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "arrow.triangle.branch")
                                 .font(.system(size: 18, weight: .semibold))
@@ -35,6 +37,7 @@ struct InAppToolsView: View {
                         }
                         .padding(.vertical, 4)
                     }
+                    .buttonStyle(.plain)
                     .disabled(!appState.appNetworkIsActive)
                     .opacity(appState.appNetworkIsActive ? 1 : 0.45)
                 } footer: {
@@ -44,7 +47,9 @@ struct InAppToolsView: View {
 
             Section {
                 if BrowserRuntime.supportsLiveProxy {
-                    NavigationLink(destination: TailnetBrowserView()) {
+                    Button {
+                        appState.presentInAppBrowser()
+                    } label: {
                         InAppToolRow(
                             title: "Browser",
                             subtitle: "Open HTTP services on your tailnet",
@@ -52,10 +57,14 @@ struct InAppToolsView: View {
                             color: .blue
                         )
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!appState.appNetworkIsActive)
                     .opacity(appState.appNetworkIsActive ? 1 : 0.45)
                 }
 
-                NavigationLink(destination: TailnetTerminalView()) {
+                Button {
+                    appState.presentInAppTerminal()
+                } label: {
                     InAppToolRow(
                         title: "Terminal",
                         subtitle: "SSH into devices on your tailnet",
@@ -63,6 +72,8 @@ struct InAppToolsView: View {
                         color: .green
                     )
                 }
+                .buttonStyle(.plain)
+                .disabled(!appState.appNetworkIsActive)
                 .opacity(appState.appNetworkIsActive ? 1 : 0.45)
             } footer: {
                 if !appState.appNetworkIsActive {
@@ -136,6 +147,7 @@ struct TailnetBrowserView: View {
     @State private var addressFieldFocused = false
     @State private var addressSelectionToken = 0
     @State private var addressCursorEndToken = 0
+    @State private var didLoadPersistedState = false
 
     private var activeTab: BrowserTab {
         guard tabs.indices.contains(activeTabIndex) else { return BrowserTab.blank() }
@@ -166,7 +178,7 @@ struct TailnetBrowserView: View {
 
     private var collapsedAddressLabel: String {
         let url = activeURL
-        guard !url.isEmpty else { return "Search or address" }
+        guard !url.isEmpty else { return "Enter address" }
         return URL(string: url)?.host ?? url
     }
 
@@ -229,7 +241,12 @@ struct TailnetBrowserView: View {
         } message: {
             Text("This will close the current browser view. Your tabs and history will stay saved.")
         }
-        .onAppear(perform: loadPersistedBrowserState)
+        .onAppear {
+            if !didLoadPersistedState {
+                didLoadPersistedState = true
+                loadPersistedBrowserState()
+            }
+        }
         .onChange(of: addressFieldFocused) { focused in
             guard !focused, activeTab.page != nil, isAddressEditing else { return }
             cancelAddressEditing()
@@ -292,6 +309,7 @@ struct TailnetBrowserView: View {
                 collapsedBrowserBottomBar
             }
         }
+        .frame(maxWidth: .infinity)
         .foregroundColor(.primary)
         .padding(.horizontal, shouldShowExpandedAddressBar ? 16 : 10)
         .padding(.top, 10)
@@ -309,25 +327,40 @@ struct TailnetBrowserView: View {
 
     private var expandedAddressBar: some View {
         HStack(spacing: 12) {
+            if isStartPage {
+                Button {
+                    requestCloseBrowser()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 18, weight: .medium))
+                        .frame(width: 34, height: 42)
+                }
+                .accessibilityLabel("Close Browser")
+            }
+
             HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: "globe")
                     .foregroundColor(.secondary)
 
                 BrowserAddressTextField(
                     text: $address,
                     isFocused: $addressFieldFocused,
-                    placeholder: "Search or enter address",
+                    placeholder: "Enter address",
                     selectionToken: addressSelectionToken,
                     cursorEndToken: addressCursorEndToken,
                     onSubmit: commitAddressEntry
                 )
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: 24)
+                .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 14)
+            .layoutPriority(1)
             .frame(maxWidth: .infinity)
             .frame(height: 48)
             .background(Color(uiColor: .secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipped()
 
             if !isStartPage {
                 Button("Cancel") {
@@ -368,6 +401,7 @@ struct TailnetBrowserView: View {
                         .foregroundColor(.secondary)
                     Text(collapsedAddressLabel)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, 12)
@@ -988,7 +1022,7 @@ private struct BrowserStartPage: View {
 
                 if bookmarks.isEmpty && history.isEmpty && errorMessage == nil {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Start typing below")
+                        Text("Enter an address below")
                             .font(.headline)
                         Text("Recent bookmarks and history will appear here once you browse a few pages.")
                             .font(.subheadline)
@@ -1120,6 +1154,8 @@ private struct BrowserAddressTextField: UIViewRepresentable {
         textField.textColor = .label
         textField.tintColor = .systemBlue
         textField.placeholder = placeholder
+        textField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return textField
     }
 
@@ -1779,15 +1815,17 @@ struct TailnetTerminalView: View {
     @State private var bookmarks: [SSHBookmark] = []
     @State private var showingConnectionEditor: Bool
     @State private var terminalKeyboardMode: TerminalKeyboardMode = .system
-    @State private var input = ""
     @State private var queuedSSHInput = ""
     @State private var lines: [TerminalLine] = []
+    @State private var terminalScreen = TerminalScreenBuffer()
+    @State private var terminalOutputRevision = 0
     @State private var sessionID: String?
     @State private var isConnected = false
     @State private var isConnecting = false
     @State private var isSending = false
     @State private var errorMessage: String?
     @State private var pollTask: Task<Void, Never>?
+    @State private var consecutivePollFailures = 0
     @State private var didHandleInitialHost = false
 
     init(initialHost: String = "", initialPort: Int = 22, sshHint: String? = nil, autoConnectInitialHost: Bool = false) {
@@ -1873,17 +1911,18 @@ struct TailnetTerminalView: View {
     private var connectedTerminalView: some View {
         ZStack {
             TerminalTheme.background.ignoresSafeArea()
-            TerminalOutputView(lines: lines, errorMessage: errorMessage)
+            TerminalOutputView(
+                lines: lines,
+                outputRevision: terminalOutputRevision,
+                errorMessage: errorMessage
+            )
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             TerminalInputDock(
                 host: host,
                 username: username,
                 port: port,
-                input: $input,
                 keyboardMode: $terminalKeyboardMode,
-                isSending: isSending,
-                canSend: canSend,
                 onSendInput: sendKeyboardInput,
                 onDisconnect: { disconnect() }
             )
@@ -2207,16 +2246,6 @@ struct TailnetTerminalView: View {
         appState.appNetworkIsActive && isConnected && sessionID != nil
     }
 
-    private func sendCurrentInput() {
-        let payload = input
-        input = ""
-        send(payload: payload, appendNewline: true, echoInput: !payload.isEmpty)
-    }
-
-    private func sendShortcut(_ payload: String) {
-        send(payload: payload, appendNewline: false, echoInput: false)
-    }
-
     private func sendKeyboardInput(_ payload: String) {
         send(payload: payload, appendNewline: false, echoInput: false)
     }
@@ -2239,6 +2268,8 @@ struct TailnetTerminalView: View {
 
         isConnecting = true
         errorMessage = nil
+        terminalScreen.reset()
+        lines = []
         lines.append(TerminalLine(kind: .notice, text: "Connecting to \(targetUser)@\(targetHost):\(portNumber)"))
 
         Task {
@@ -2259,12 +2290,14 @@ struct TailnetTerminalView: View {
                     isConnected = response.active
                     isConnecting = false
                     terminalKeyboardMode = .system
-                    appendSSHResponse(response)
                     if response.active {
+                        consecutivePollFailures = 0
                         showingConnectionEditor = false
                         lines.append(TerminalLine(kind: .notice, text: "Connected"))
+                        appendSSHResponse(response)
                         startPolling(sessionID: response.sessionID)
                     } else {
+                        appendSSHResponse(response)
                         lines.append(TerminalLine(kind: .error, text: "SSH session closed immediately"))
                     }
                 }
@@ -2322,11 +2355,13 @@ struct TailnetTerminalView: View {
 
     private func startPolling(sessionID: String) {
         pollTask?.cancel()
+        consecutivePollFailures = 0
         pollTask = Task {
             while !Task.isCancelled {
                 do {
                     let response = try await appState.readInAppSSHSession(sessionID: sessionID)
                     await MainActor.run {
+                        consecutivePollFailures = 0
                         appendSSHResponse(response)
                         if !response.active {
                             markDisconnected()
@@ -2334,27 +2369,43 @@ struct TailnetTerminalView: View {
                     }
                     if !response.active { break }
                 } catch {
-                    await MainActor.run {
+                    if Task.isCancelled { break }
+                    let shouldDisconnect = await MainActor.run { () -> Bool in
+                        consecutivePollFailures += 1
                         errorMessage = error.localizedDescription
-                        lines.append(TerminalLine(kind: .error, text: error.localizedDescription))
-                        markDisconnected()
+                        if consecutivePollFailures >= 3 {
+                            lines.append(TerminalLine(kind: .error, text: error.localizedDescription))
+                            markDisconnected()
+                            return true
+                        }
+                        return false
                     }
-                    break
+                    if shouldDisconnect { break }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    continue
                 }
-
-                try? await Task.sleep(nanoseconds: 700_000_000)
             }
         }
     }
 
     private func appendSSHResponse(_ response: InAppSSHResponse) {
-        let text = response.body ?? response.bodyBase64.map { "Base64 response:\n\($0)" } ?? ""
-        if !text.isEmpty {
-            lines.append(TerminalLine(kind: .output, text: text))
+        if let bodyData = response.terminalOutputData, !bodyData.isEmpty {
+            appendTerminalOutput(bodyData)
         }
         if response.truncated {
             lines.append(TerminalLine(kind: .notice, text: "Output truncated"))
         }
+    }
+
+    private func appendTerminalOutput(_ data: Data) {
+        terminalScreen.append(data)
+        let text = terminalScreen.renderedTextWithCursor
+        if let lastIndex = lines.indices.last, lines[lastIndex].kind == .output {
+            lines[lastIndex].text = text
+        } else {
+            lines.append(TerminalLine(kind: .output, text: text))
+        }
+        terminalOutputRevision &+= 1
     }
 
     private func disconnect(appendNotice: Bool = true) {
@@ -2366,6 +2417,7 @@ struct TailnetTerminalView: View {
         isConnecting = false
         isSending = false
         queuedSSHInput = ""
+        consecutivePollFailures = 0
         if appendNotice, closingSessionID != nil {
             lines.append(TerminalLine(kind: .notice, text: "Disconnected"))
         }
@@ -2384,6 +2436,7 @@ struct TailnetTerminalView: View {
         isConnecting = false
         isSending = false
         queuedSSHInput = ""
+        consecutivePollFailures = 0
         lines.append(TerminalLine(kind: .notice, text: "Disconnected"))
     }
 
@@ -2644,10 +2697,7 @@ private struct TerminalInputDock: View {
     let host: String
     let username: String
     let port: String
-    @Binding var input: String
     @Binding var keyboardMode: TerminalKeyboardMode
-    let isSending: Bool
-    let canSend: Bool
     let onSendInput: (String) -> Void
     let onDisconnect: () -> Void
 
@@ -2748,29 +2798,18 @@ private struct TerminalKeyboardCaptureView: UIViewRepresentable {
     let isFirstResponder: Bool
     let onInput: (String) -> Void
 
-    func makeUIView(context: Context) -> UITextView {
-        let view = UITextView(frame: .zero)
-        view.delegate = context.coordinator
+    func makeUIView(context: Context) -> TerminalInputView {
+        let view = TerminalInputView(frame: .zero)
+        view.onInput = context.coordinator.onInput
         view.backgroundColor = .clear
-        view.textColor = .clear
         view.tintColor = .clear
-        view.autocapitalizationType = .none
-        view.autocorrectionType = .no
-        view.spellCheckingType = .no
-        view.smartDashesType = .no
-        view.smartQuotesType = .no
-        view.smartInsertDeleteType = .no
-        view.keyboardType = .asciiCapable
-        view.returnKeyType = .default
-        view.isScrollEnabled = false
-        view.textContainerInset = .zero
-        view.textContainer.lineFragmentPadding = 0
         view.accessibilityLabel = "Terminal input"
         return view
     }
 
-    func updateUIView(_ uiView: UITextView, context: Context) {
+    func updateUIView(_ uiView: TerminalInputView, context: Context) {
         context.coordinator.onInput = onInput
+        uiView.onInput = context.coordinator.onInput
         if isFirstResponder {
             DispatchQueue.main.async {
                 if !uiView.isFirstResponder {
@@ -2786,27 +2825,75 @@ private struct TerminalKeyboardCaptureView: UIViewRepresentable {
         Coordinator(onInput: onInput)
     }
 
-    final class Coordinator: NSObject, UITextViewDelegate {
+    final class Coordinator: NSObject {
         var onInput: (String) -> Void
 
         init(onInput: @escaping (String) -> Void) {
             self.onInput = onInput
         }
+    }
 
-        func textView(
-            _ textView: UITextView,
-            shouldChangeTextIn range: NSRange,
-            replacementText text: String
-        ) -> Bool {
-            if text.isEmpty, range.length > 0 {
-                onInput("\u{7f}")
-            } else if text == "\n" {
-                onInput("\r")
+    final class TerminalInputView: UIView, UIKeyInput {
+        var onInput: ((String) -> Void)?
+
+        override var canBecomeFirstResponder: Bool {
+            true
+        }
+
+        var hasText: Bool {
+            true
+        }
+
+        var keyboardType: UIKeyboardType {
+            get { .asciiCapable }
+            set { }
+        }
+
+        var autocapitalizationType: UITextAutocapitalizationType {
+            get { .none }
+            set { }
+        }
+
+        var autocorrectionType: UITextAutocorrectionType {
+            get { .no }
+            set { }
+        }
+
+        var spellCheckingType: UITextSpellCheckingType {
+            get { .no }
+            set { }
+        }
+
+        var smartDashesType: UITextSmartDashesType {
+            get { .no }
+            set { }
+        }
+
+        var smartQuotesType: UITextSmartQuotesType {
+            get { .no }
+            set { }
+        }
+
+        var smartInsertDeleteType: UITextSmartInsertDeleteType {
+            get { .no }
+            set { }
+        }
+
+        var returnKeyType: UIReturnKeyType {
+            get { .default }
+            set { }
+        }
+
+        func insertText(_ text: String) {
+            if text == "\n" {
+                onInput?("\r")
             } else if !text.isEmpty {
-                onInput(text)
+                onInput?(text)
             }
-            textView.text = ""
-            return false
+        }
+
+        func deleteBackward() {
+            onInput?("\u{7f}")
         }
     }
 }
@@ -3104,7 +3191,9 @@ private enum InAppCredentialStore {
 
 private struct TerminalOutputView: View {
     let lines: [TerminalLine]
+    let outputRevision: Int
     let errorMessage: String?
+    private let bottomID = "terminal-output-bottom"
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -3123,17 +3212,31 @@ private struct TerminalOutputView: View {
                             .textSelection(.enabled)
                             .id(line.id)
                     }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomID)
                 }
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
                 .padding(.bottom, 14)
             }
             .background(Color(red: 0.03, green: 0.05, blue: 0.08))
-            .onChange(of: lines.count) { _ in
-                if let last = lines.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+            .onAppear {
+                scrollToBottom(proxy)
             }
+            .onChange(of: lines.count) { _ in
+                scrollToBottom(proxy)
+            }
+            .onChange(of: outputRevision) { _ in
+                scrollToBottom(proxy)
+            }
+        }
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            proxy.scrollTo(bottomID, anchor: .bottom)
         }
     }
 }
@@ -3148,7 +3251,7 @@ private struct TerminalLine: Identifiable {
 
     let id = UUID()
     let kind: Kind
-    let text: String
+    var text: String
 
     var displayText: String {
         switch kind {

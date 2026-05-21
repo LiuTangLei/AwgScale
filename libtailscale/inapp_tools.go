@@ -69,6 +69,8 @@ func (a *App) withInAppToolsHandler(base http.Handler, b *backend) http.Handler 
 		switch r.URL.Path {
 		case "/localapi/v0/awg-sync-apply":
 			a.handleAWGSyncApply(w, r, b)
+		case "/localapi/v0/awg-sync-peers":
+			a.handleAWGSyncPeers(w, r, b)
 		case "/localapi/v0/awgscale/http-fetch":
 			a.handleInAppHTTPFetch(w, r, b)
 		case "/localapi/v0/awgscale/browser-proxy":

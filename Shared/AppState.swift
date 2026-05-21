@@ -21,7 +21,40 @@ private func defaultVPNPermissionEnabled() -> Bool {
     if let stored = UserDefaults.standard.object(forKey: vpnPermissionEnabledKey) as? Bool {
         return stored
     }
-    return true
+    return hasPacketTunnelProviderEntitlement()
+}
+
+private func hasPacketTunnelProviderEntitlement() -> Bool {
+        guard let entitlements = embeddedProvisioningProfileEntitlements(),
+                    let entitlement = entitlements["com.apple.developer.networking.networkextension"] else {
+        return false
+    }
+
+    if let values = entitlement as? [String] {
+        return values.contains("packet-tunnel-provider")
+    }
+
+    return (entitlement as? Bool) == true
+}
+
+private func embeddedProvisioningProfileEntitlements() -> [String: Any]? {
+    guard let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+          let profileData = try? Data(contentsOf: profileURL),
+          let plistData = embeddedProvisioningProfilePlistData(from: profileData),
+          let profile = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else {
+        return nil
+    }
+    return profile["Entitlements"] as? [String: Any]
+}
+
+private func embeddedProvisioningProfilePlistData(from data: Data) -> Data? {
+    let startMarker = Data("<?xml".utf8)
+    let endMarker = Data("</plist>".utf8)
+    guard let startRange = data.range(of: startMarker),
+          let endRange = data.range(of: endMarker, options: [], in: startRange.lowerBound..<data.endIndex) else {
+        return nil
+    }
+    return Data(data[startRange.lowerBound..<endRange.upperBound])
 }
 
 private extension IpnState {
@@ -48,6 +81,14 @@ private extension IpnState {
 ///
 /// This replaces single-process global state with app/extension IPC state.
 /// All updates must happen on @MainActor since SwiftUI observes this.
+struct InAppTerminalPresentationRequest: Identifiable {
+    let id = UUID()
+    let initialHost: String
+    let initialPort: Int
+    let sshHint: String?
+    let autoConnectInitialHost: Bool
+}
+
 @MainActor
 class AppState: ObservableObject {
     // MARK: - Published State
@@ -69,6 +110,9 @@ class AppState: ObservableObject {
     @Published var isUpdatingExitNode: Bool = false
     @Published var pendingExitNodeID: String?
     @Published var pendingExitNodeAllowLANAccess: Bool?
+    @Published var isInAppExitNodePickerPresented: Bool = false
+    @Published var isInAppBrowserPresented: Bool = false
+    @Published var inAppTerminalPresentation: InAppTerminalPresentationRequest?
     @Published var outgoingTaildropFiles: [TaildropOutgoingFile] = []
     @Published var incomingTaildropFiles: [TaildropIncomingFile] = []
     @Published var taildropFilesWaiting: Bool = false
@@ -96,6 +140,7 @@ class AppState: ObservableObject {
     private var awgPeersLoaded = false
     private var awgPeersLoading = false
     private var awgLastRefresh: Date?
+    private var awgLastRefreshPeerIDs: Set<String> = []
     private let awgRefreshInterval: TimeInterval = 30
 
     /// Reference to VPNManager for IPC. Set by the app at launch.
@@ -145,6 +190,38 @@ class AppState: ObservableObject {
         pendingWantRunning ?? (usesVPNPermission ? systemActive : appNetworkIsActive)
     }
 
+    func presentInAppBrowser() {
+        guard appNetworkIsActive else { return }
+        isInAppBrowserPresented = true
+    }
+
+    func presentInAppExitNodePicker() {
+        guard appNetworkIsActive else { return }
+        isInAppExitNodePickerPresented = true
+    }
+
+    func dismissInAppExitNodePicker() {
+        isInAppExitNodePickerPresented = false
+    }
+
+    func dismissInAppBrowser() {
+        isInAppBrowserPresented = false
+    }
+
+    func presentInAppTerminal(initialHost: String = "", initialPort: Int = 22, sshHint: String? = nil, autoConnectInitialHost: Bool = false) {
+        guard appNetworkIsActive else { return }
+        inAppTerminalPresentation = InAppTerminalPresentationRequest(
+            initialHost: initialHost,
+            initialPort: initialPort,
+            sshHint: sshHint,
+            autoConnectInitialHost: autoConnectInitialHost
+        )
+    }
+
+    func dismissInAppTerminal() {
+        inAppTerminalPresentation = nil
+    }
+
     func setUsesVPNPermission(_ enabled: Bool) {
         guard usesVPNPermission != enabled else { return }
         guard pendingWantRunning == nil, !isSwitchingNetworkMode else {
@@ -166,6 +243,7 @@ class AppState: ObservableObject {
 
     private func resetNetworksForPermissionModeChange(from previousMode: Bool, to enabled: Bool) async {
         _ = previousMode
+        let preservedAwgConfig = currentAwgConfig ?? prefs?.AmneziaWG
         defer {
             isSwitchingNetworkMode = false
         }
@@ -173,6 +251,9 @@ class AppState: ObservableObject {
         loginCompletionPollTask?.cancel()
         loginCompletionPollTask = nil
         pendingWantRunning = nil
+        if !isLoggingIn && !loginMayRequireMachineAuth {
+            isAwaitingMachineAuth = false
+        }
 
         if loginBackend.isRunning {
             do {
@@ -198,6 +279,10 @@ class AppState: ObservableObject {
         }
 
         updateCachedPrefs(wantRunning: false)
+        if let preservedAwgConfig {
+            currentAwgConfig = preservedAwgConfig
+            localAwgStatus = preservedAwgConfig.hasNonDefaultValues
+        }
         if hasBackendSnapshot {
             ipnState = .stopped
             sharedDefaults?.set(IpnState.stopped.rawValue, forKey: IPCConstants.keyIPNState)
@@ -211,7 +296,7 @@ class AppState: ObservableObject {
 
         if !enabled {
             isSwitchingNetworkMode = false
-            resumeAppBackendIfNeeded(vpnActive: false, allowColdStart: true)
+            resumeAppBackendIfNeeded(vpnActive: false, allowColdStart: hasBackendSnapshot)
         }
     }
 
@@ -220,11 +305,11 @@ class AppState: ObservableObject {
     }
 
     private var isBackendTransitionInProgress: Bool {
-        pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode
+        pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode || isSwitchingNetworkMode
     }
 
     private var isPreservingSnapshotForBackendTransition: Bool {
-        hasBackendSnapshot && (pendingWantRunning == true || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode)
+        hasBackendSnapshot && (pendingWantRunning == true || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode || isSwitchingNetworkMode)
     }
 
     private var isAppLoginBackendExpected: Bool {
@@ -236,7 +321,7 @@ class AppState: ObservableObject {
     }
 
     private var canShowMachineAuthDuringLogin: Bool {
-        loginMayRequireMachineAuth || loginBrowserWasPresented || !isLoggingIn
+        loginMayRequireMachineAuth || loginBrowserWasPresented
     }
 
     // MARK: - Initialization
@@ -377,6 +462,9 @@ class AppState: ObservableObject {
         isUpdatingExitNode = false
         pendingExitNodeID = nil
         pendingExitNodeAllowLANAccess = nil
+        isInAppExitNodePickerPresented = false
+        isInAppBrowserPresented = false
+        inAppTerminalPresentation = nil
         outgoingTaildropFiles = []
         incomingTaildropFiles = []
         taildropFilesWaiting = false
@@ -402,6 +490,7 @@ class AppState: ObservableObject {
         awgPeersLoaded = false
         awgPeersLoading = false
         awgLastRefresh = nil
+        awgLastRefreshPeerIDs = []
         isUpdatingExitNode = false
         pendingExitNodeID = nil
         pendingExitNodeAllowLANAccess = nil
@@ -732,7 +821,7 @@ class AppState: ObservableObject {
 
     func sendInAppSSHInput(sessionID: String, input: String) async throws -> InAppSSHResponse {
         let endpoint = "/localapi/v0/awgscale/ssh/send"
-        let request = InAppSSHSendRequest(sessionID: sessionID, input: input)
+        let request = InAppSSHSendRequest(sessionID: sessionID, input: input, waitMillis: 35)
         let body = try JSONEncoder().encode(request)
         let response = try await activeLocalAPIClient().raw(
             method: "POST",
@@ -743,9 +832,9 @@ class AppState: ObservableObject {
         return try response.decodedBody(InAppSSHResponse.self, endpoint: endpoint)
     }
 
-    func readInAppSSHSession(sessionID: String) async throws -> InAppSSHResponse {
+    func readInAppSSHSession(sessionID: String, waitMillis: Int = 100) async throws -> InAppSSHResponse {
         let endpoint = "/localapi/v0/awgscale/ssh/read"
-        let request = InAppSSHSessionRequest(sessionID: sessionID)
+        let request = InAppSSHSessionRequest(sessionID: sessionID, waitMillis: waitMillis)
         let body = try JSONEncoder().encode(request)
         let response = try await activeLocalAPIClient().raw(
             method: "POST",
@@ -882,7 +971,6 @@ class AppState: ObservableObject {
         if !nsError.userInfo.isEmpty {
             parts.append("userInfo=\(nsError.userInfo)")
         }
-        parts.append("debug=\(String(reflecting: error))")
         return parts.joined(separator: "; ")
     }
 
@@ -988,12 +1076,7 @@ class AppState: ObservableObject {
                     loginBackend.stop()
                 }
             case .needsMachineAuth:
-                if coldStart {
-                    isAwaitingMachineAuth = true
-                    startLoginCompletionPolling()
-                    return
-                }
-                guard isLoggingIn || loginMayRequireMachineAuth else {
+                guard canShowMachineAuthDuringLogin else {
                     resetStaleLoginState()
                     return
                 }
@@ -1329,7 +1412,13 @@ class AppState: ObservableObject {
         updateCachedPrefs(wantRunning: wantRunning)
 
         Task {
-            defer { pendingWantRunning = nil }
+            var shouldRefreshAwgAfterTransition = false
+            defer {
+                pendingWantRunning = nil
+                if shouldRefreshAwgAfterTransition {
+                    refreshAwgStatusForTunnelChange()
+                }
+            }
 
             do {
                 lastError = nil
@@ -1362,6 +1451,7 @@ class AppState: ObservableObject {
 
                 try await connectVPNAndSetWantRunningWithRetry(vpn)
                 await refreshTunnelStatus()
+                shouldRefreshAwgAfterTransition = true
             } catch {
                 lastError = "Failed to update preferences: \(error.localizedDescription)"
                 if wantRunning {
@@ -1382,7 +1472,13 @@ class AppState: ObservableObject {
         updateCachedPrefs(wantRunning: wantRunning)
 
         Task {
-            defer { pendingWantRunning = nil }
+            var shouldRefreshAwgAfterTransition = false
+            defer {
+                pendingWantRunning = nil
+                if shouldRefreshAwgAfterTransition {
+                    refreshAwgStatusForTunnelChange()
+                }
+            }
 
             do {
                 lastError = nil
@@ -1417,6 +1513,7 @@ class AppState: ObservableObject {
                 }
 
                 await fetchCurrentProfileFromLoginBackend()
+                shouldRefreshAwgAfterTransition = true
             } catch {
                 lastError = "Failed to update app-only connection: \(error.localizedDescription)"
                 updateCachedPrefs(wantRunning: false)
@@ -1614,7 +1711,8 @@ class AppState: ObservableObject {
             if showMessages { awgStatusMessage = "Connect app network to refresh AWG status" }
             return
         }
-        if !force, awgPeersLoaded, let awgLastRefresh,
+        let currentPeerIDs = Set(peers.map(\.id))
+        if !force, awgPeersLoaded, awgLastRefreshPeerIDs == currentPeerIDs, let awgLastRefresh,
            Date().timeIntervalSince(awgLastRefresh) < awgRefreshInterval {
             if showMessages { awgStatusMessage = "AWG status is already up to date" }
             return
@@ -1637,6 +1735,7 @@ class AppState: ObservableObject {
             if loadedPeers {
                 awgPeersLoaded = true
                 awgLastRefresh = Date()
+                awgLastRefreshPeerIDs = currentPeerIDs
             }
         }
     }
@@ -2171,6 +2270,7 @@ class AppState: ObservableObject {
     private func refreshPrefsFromActiveBackend(timeout: Int = 3000) async {
         do {
             prefs = try await activeLocalAPIClient().ipnPrefs(timeout: timeout)
+            updateLocalAwgStatusFromCachedPrefs()
         } catch {
             // Notify updates from the backend will refresh prefs shortly.
         }

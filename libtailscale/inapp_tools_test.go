@@ -1,9 +1,11 @@
 package libtailscale
 
 import (
+	"context"
 	"net/netip"
 	"reflect"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -82,5 +84,39 @@ func TestInAppHostnameShouldStayInTailnetWithoutBackend(t *testing.T) {
 		if got != tt.want {
 			t.Fatalf("inAppHostnameShouldStayInTailnet(%q) = %v, want %v", tt.host, got, tt.want)
 		}
+	}
+}
+
+func TestInAppSSHWaitForOutputReturnsOnAppend(t *testing.T) {
+	session := &inAppSSHSession{
+		done:        make(chan struct{}),
+		outputReady: make(chan struct{}, 1),
+	}
+	waitReturned := make(chan struct{})
+	go func() {
+		session.waitForOutput(context.Background(), time.Second)
+		close(waitReturned)
+	}()
+
+	select {
+	case <-waitReturned:
+		t.Fatal("waitForOutput returned before output arrived")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	session.appendOutput([]byte("prompt"))
+
+	select {
+	case <-waitReturned:
+	case <-time.After(time.Second):
+		t.Fatal("waitForOutput did not return after output arrived")
+	}
+
+	data, truncated := session.drainOutput()
+	if got := string(data); got != "prompt" {
+		t.Fatalf("drainOutput() body = %q, want %q", got, "prompt")
+	}
+	if truncated {
+		t.Fatal("drainOutput() reported truncated output")
 	}
 }

@@ -32,3 +32,61 @@ final class LocalAPITests: XCTestCase {
         }
     }
 }
+
+final class TerminalScreenBufferTests: XCTestCase {
+    func testConsumesBracketedPasteModeSequences() {
+        var terminal = TerminalScreenBuffer()
+
+        terminal.append(Data("\u{1B}[?2004hroot@host:~# ".utf8))
+        terminal.append(Data("\u{1B}[?2004l".utf8))
+
+        XCTAssertEqual(terminal.renderedText, "root@host:~#")
+    }
+
+    func testCarriageReturnAndEraseLineReplaceHistoryPrompt() {
+        var terminal = TerminalScreenBuffer()
+
+        terminal.append(Data("root@host:~# docker ps".utf8))
+        terminal.append(Data("\r\u{1B}[Kroot@host:~# ls".utf8))
+
+        XCTAssertEqual(terminal.renderedText, "root@host:~# ls")
+    }
+
+    func testBackspaceEchoUpdatesCurrentLine() {
+        var terminal = TerminalScreenBuffer()
+
+        terminal.append(Data("root@host:~# catt\u{8} \u{8}".utf8))
+
+        XCTAssertEqual(terminal.renderedText, "root@host:~# cat")
+    }
+
+    func testSplitUTF8ScalarIsDecodedOnceComplete() {
+        var terminal = TerminalScreenBuffer()
+        let bytes = Array("好".utf8)
+
+        terminal.append(Data(bytes.prefix(2)))
+        XCTAssertEqual(terminal.renderedText, "")
+
+        terminal.append(Data(bytes.suffix(1)))
+        XCTAssertEqual(terminal.renderedText, "好")
+    }
+
+    func testRenderedTextWithCursorUsesBufferedCursorPosition() {
+        var terminal = TerminalScreenBuffer()
+
+        terminal.append(Data("abc\u{1B}[D".utf8))
+
+        XCTAssertEqual(terminal.renderedText, "abc")
+        XCTAssertEqual(terminal.renderedTextWithCursor, "ab█")
+    }
+
+    func testCursorVisibilitySequencesHideAndShowCursor() {
+        var terminal = TerminalScreenBuffer()
+
+        terminal.append(Data("abc\u{1B}[?25l".utf8))
+        XCTAssertEqual(terminal.renderedTextWithCursor, "abc")
+
+        terminal.append(Data("\u{1B}[?25h".utf8))
+        XCTAssertEqual(terminal.renderedTextWithCursor, "abc█")
+    }
+}

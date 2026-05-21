@@ -33,27 +33,30 @@ type inAppSSHOpenRequest struct {
 }
 
 type inAppSSHSessionRequest struct {
-	SessionID string `json:"sessionID"`
+	SessionID  string `json:"sessionID"`
+	WaitMillis int    `json:"waitMillis,omitempty"`
 }
 
 type inAppSSHSendRequest struct {
-	SessionID string `json:"sessionID"`
-	Input     string `json:"input"`
+	SessionID  string `json:"sessionID"`
+	Input      string `json:"input"`
+	WaitMillis int    `json:"waitMillis,omitempty"`
 }
 
 type inAppSSHResponse struct {
-	SessionID string `json:"sessionID"`
-	Body      string `json:"body,omitempty"`
+	SessionID  string `json:"sessionID"`
+	Body       string `json:"body,omitempty"`
 	BodyBase64 string `json:"bodyBase64,omitempty"`
-	Active    bool   `json:"active"`
-	Truncated bool   `json:"truncated"`
+	Active     bool   `json:"active"`
+	Truncated  bool   `json:"truncated"`
 }
 
 type inAppSSHSession struct {
-	client  *ssh.Client
-	session *ssh.Session
-	stdin   io.WriteCloser
-	done    chan struct{}
+	client      *ssh.Client
+	session     *ssh.Session
+	stdin       io.WriteCloser
+	done        chan struct{}
+	outputReady chan struct{}
 
 	mu        sync.Mutex
 	buffer    []byte
@@ -167,10 +170,11 @@ func (a *App) handleInAppSSHOpen(w http.ResponseWriter, r *http.Request, b *back
 	}
 
 	session := &inAppSSHSession{
-		client:  client,
-		session: sshSession,
-		stdin:   stdin,
-		done:    make(chan struct{}),
+		client:      client,
+		session:     sshSession,
+		stdin:       stdin,
+		done:        make(chan struct{}),
+		outputReady: make(chan struct{}, 1),
 	}
 	id, err := randomSessionID()
 	if err != nil {
@@ -215,6 +219,9 @@ func (a *App) handleInAppSSHSend(w http.ResponseWriter, r *http.Request) {
 		writeInAppJSONError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	if req.WaitMillis > 0 {
+		session.waitForOutput(r.Context(), time.Duration(req.WaitMillis)*time.Millisecond)
+	}
 	writeSSHResponse(w, http.StatusOK, req.SessionID, session)
 }
 
@@ -233,6 +240,9 @@ func (a *App) handleInAppSSHRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeInAppJSONError(w, http.StatusNotFound, "ssh session not found")
 		return
+	}
+	if req.WaitMillis > 0 {
+		session.waitForOutput(r.Context(), time.Duration(req.WaitMillis)*time.Millisecond)
 	}
 	writeSSHResponse(w, http.StatusOK, req.SessionID, session)
 }
@@ -323,22 +333,54 @@ func (s *inAppSSHSession) copyOutput(r io.Reader) {
 
 func (s *inAppSSHSession) appendOutput(data []byte) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.buffer = append(s.buffer, data...)
 	if len(s.buffer) > inAppSSHBufferLimit {
 		s.buffer = append([]byte(nil), s.buffer[len(s.buffer)-inAppSSHBufferLimit:]...)
 		s.truncated = true
 	}
+	s.mu.Unlock()
+
+	select {
+	case s.outputReady <- struct{}{}:
+	default:
+	}
 }
 
 func (s *inAppSSHSession) drainOutput() ([]byte, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	data := append([]byte(nil), s.buffer...)
 	s.buffer = nil
 	truncated := s.truncated
 	s.truncated = false
+	s.mu.Unlock()
+
+	select {
+	case <-s.outputReady:
+	default:
+	}
 	return data, truncated
+}
+
+func (s *inAppSSHSession) waitForOutput(ctx context.Context, timeout time.Duration) {
+	if timeout <= 0 || s.hasPendingOutputOrClosed() {
+		return
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+	case <-s.done:
+	case <-s.outputReady:
+	case <-timer.C:
+	}
+}
+
+func (s *inAppSSHSession) hasPendingOutputOrClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.buffer) > 0 || s.closed
 }
 
 func (s *inAppSSHSession) active() bool {

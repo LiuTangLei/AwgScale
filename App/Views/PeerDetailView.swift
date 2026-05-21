@@ -168,8 +168,8 @@ struct PeerDetailView: View {
 
             if !peer.isCurrentDevice && !peer.sshTargetHost.isEmpty {
                 Section {
-                    NavigationLink {
-                        TailnetTerminalView(
+                    Button {
+                        appState.presentInAppTerminal(
                             initialHost: peer.primaryIPv4Address ?? peer.sshTargetHost,
                             sshHint: peer.sshCapabilityLabel,
                             autoConnectInitialHost: true
@@ -184,8 +184,15 @@ struct PeerDetailView: View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
+
+                            Spacer()
+
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundColor(Color(uiColor: .tertiaryLabel))
                         }
                     }
+                    .buttonStyle(.plain)
                 } header: {
                     Text("Actions")
                 }

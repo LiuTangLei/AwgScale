@@ -28,6 +28,11 @@ struct MainView: View {
         return appState.peers.first { $0.id == selectedPeerID }
     }
 
+    private var awgScanTaskID: String {
+        let peerIDs = visiblePeers.map(\.id).joined(separator: ",")
+        return "\(appState.usesVPNPermission)-\(vpnIsActive)-\(appState.ipnState.rawValue)-\(peerIDs)"
+    }
+
     private var connectionTitle: String {
         if let pending = appState.pendingWantRunning {
             return pending ? "Connecting" : "Disconnecting"
@@ -229,6 +234,9 @@ struct MainView: View {
             .onAppear {
                 presentTaildropPromptIfNeeded()
             }
+            .task(id: awgScanTaskID) {
+                appState.loadAwgStatusIfNeeded()
+            }
             .onChange(of: appState.taildropInboxRevision) { _ in
                 presentTaildropPromptIfNeeded()
             }
@@ -303,7 +311,7 @@ struct PeerRow: View {
             .buttonStyle(.plain)
             .contentShape(Rectangle())
 
-            if !peer.isCurrentDevice {
+            if !peer.isCurrentDevice && hasAwgConfig {
                 Button {
                     appState.syncAwgConfigFromPeer(peer)
                 } label: {

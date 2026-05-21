@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/netip"
+	"sort"
+	"sync"
 	"time"
 
 	"tailscale.com/ipn"
@@ -21,6 +23,117 @@ import (
 type awgSyncApplyRequest struct {
 	NodeKey key.NodePublic `json:"nodeKey"`
 	Timeout int            `json:"timeout"`
+}
+
+type awgSyncPeerResult struct {
+	NodeKey     string             `json:"nodeKey"`
+	Hostname    string             `json:"hostname"`
+	TailscaleIP string             `json:"tailscaleIP,omitempty"`
+	Config      ipn.AmneziaWGPrefs `json:"config"`
+	Err         string             `json:"error,omitempty"`
+	idx         int
+}
+
+// The upstream LocalAPI endpoint waits a long time for every online peer to
+// answer. The in-app peer list needs a fast hint and the full apply request
+// still retries when the user chooses a peer.
+func (a *App) handleAWGSyncPeers(w http.ResponseWriter, r *http.Request, b *backend) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b == nil || b.backend == nil || b.sys == nil {
+		http.Error(w, "tailnet backend is not ready", http.StatusBadGateway)
+		return
+	}
+
+	nm := b.backend.NetMap()
+	if nm == nil {
+		http.Error(w, "no netmap available", http.StatusInternalServerError)
+		return
+	}
+
+	ms, ok := b.sys.MagicSock.GetOK()
+	if !ok || ms == nil {
+		http.Error(w, "magicsock not available", http.StatusBadGateway)
+		return
+	}
+
+	const maxConcurrent = 12
+	const perPeerTimeout = 3 * time.Second
+
+	sem := make(chan struct{}, maxConcurrent)
+	results := make(chan awgSyncPeerResult, len(nm.Peers))
+	var wg sync.WaitGroup
+
+	for i, peer := range nm.Peers {
+		if !peer.Valid() || peer.Hostinfo().ShareeNode() {
+			continue
+		}
+		if online := peer.Online(); !online.Valid() || !online.Get() {
+			continue
+		}
+
+		i := i
+		peer := peer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			result := awgSyncPeerResult{
+				idx:      i,
+				NodeKey:  peer.Key().String(),
+				Hostname: peer.Hostinfo().Hostname(),
+			}
+			if addrs := peer.Addresses(); addrs.Len() > 0 {
+				result.TailscaleIP = addrs.At(0).Addr().String()
+			}
+
+			if peer.DiscoKey().IsZero() {
+				result.Err = "peer has no disco key"
+				results <- result
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(r.Context(), perPeerTimeout)
+			config, err := requestPeerAmneziaWGConfigOnce(ctx, ms, peer.DiscoKey())
+			cancel()
+			if err != nil {
+				result.Err = err.Error()
+			} else {
+				result.Config = config
+			}
+			results <- result
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	collected := make([]awgSyncPeerResult, 0)
+	for result := range results {
+		if result.Err != "" {
+			log.Printf("awg-sync-peers: fast probe skipped peer %s (%s): %s", result.Hostname, result.NodeKey, result.Err)
+			continue
+		}
+		if result.Config == (ipn.AmneziaWGPrefs{}) {
+			continue
+		}
+		collected = append(collected, result)
+	}
+
+	sort.SliceStable(collected, func(i, j int) bool {
+		return collected[i].idx < collected[j].idx
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(collected); err != nil {
+		log.Printf("failed to encode awg-sync-peers response: %v", err)
+	}
 }
 
 func (a *App) handleAWGSyncApply(w http.ResponseWriter, r *http.Request, b *backend) {
