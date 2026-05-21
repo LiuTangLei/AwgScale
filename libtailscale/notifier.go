@@ -31,6 +31,10 @@ func (app *App) WatchNotifications(mask int, cb NotificationCallback) Notificati
 			}
 		}()
 
+		if notify.NetMap != nil {
+			app.refreshUsableDERPMapForLocalAPI("netmap-notify")
+		}
+
 		b, err := json.Marshal(notify)
 		if err != nil {
 			log.Printf("WatchNotifications: marshal: %s", err)

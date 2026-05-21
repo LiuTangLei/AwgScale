@@ -15,7 +15,47 @@ private enum LoginFlowError: Error, LocalizedError {
 }
 
 private let appInstallMarkerKey = "top.yesican.awgscale.install-marker.v3"
-private let appInstallIdentityKey = "top.yesican.awgscale.install-identity.v1"
+private let vpnPermissionEnabledKey = "top.yesican.awgscale.vpn-permission-enabled.v1"
+
+private func defaultVPNPermissionEnabled() -> Bool {
+    if let stored = UserDefaults.standard.object(forKey: vpnPermissionEnabledKey) as? Bool {
+        return stored
+    }
+    return hasPacketTunnelProviderEntitlement()
+}
+
+private func hasPacketTunnelProviderEntitlement() -> Bool {
+        guard let entitlements = embeddedProvisioningProfileEntitlements(),
+                    let entitlement = entitlements["com.apple.developer.networking.networkextension"] else {
+        return false
+    }
+
+    if let values = entitlement as? [String] {
+        return values.contains("packet-tunnel-provider")
+    }
+
+    return (entitlement as? Bool) == true
+}
+
+private func embeddedProvisioningProfileEntitlements() -> [String: Any]? {
+    guard let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+          let profileData = try? Data(contentsOf: profileURL),
+          let plistData = embeddedProvisioningProfilePlistData(from: profileData),
+          let profile = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else {
+        return nil
+    }
+    return profile["Entitlements"] as? [String: Any]
+}
+
+private func embeddedProvisioningProfilePlistData(from data: Data) -> Data? {
+    let startMarker = Data("<?xml".utf8)
+    let endMarker = Data("</plist>".utf8)
+    guard let startRange = data.range(of: startMarker),
+          let endRange = data.range(of: endMarker, options: [], in: startRange.lowerBound..<data.endIndex) else {
+        return nil
+    }
+    return Data(data[startRange.lowerBound..<endRange.upperBound])
+}
 
 private extension IpnState {
     init?(backendState: String) {
@@ -41,6 +81,14 @@ private extension IpnState {
 ///
 /// This replaces single-process global state with app/extension IPC state.
 /// All updates must happen on @MainActor since SwiftUI observes this.
+struct InAppTerminalPresentationRequest: Identifiable {
+    let id = UUID()
+    let initialHost: String
+    let initialPort: Int
+    let sshHint: String?
+    let autoConnectInitialHost: Bool
+}
+
 @MainActor
 class AppState: ObservableObject {
     // MARK: - Published State
@@ -53,12 +101,18 @@ class AppState: ObservableObject {
     @Published var health: HealthState?
     @Published var lastError: String?
     @Published var isLoggingIn: Bool = false
+    @Published var usesVPNPermission: Bool = defaultVPNPermissionEnabled()
+    @Published var isSwitchingNetworkMode: Bool = false
+    @Published var isRestoringSession: Bool = false
     @Published var isAwaitingMachineAuth: Bool = false
     @Published var browseToURL: String?
     @Published var pendingWantRunning: Bool?
     @Published var isUpdatingExitNode: Bool = false
     @Published var pendingExitNodeID: String?
     @Published var pendingExitNodeAllowLANAccess: Bool?
+    @Published var isInAppExitNodePickerPresented: Bool = false
+    @Published var isInAppBrowserPresented: Bool = false
+    @Published var inAppTerminalPresentation: InAppTerminalPresentationRequest?
     @Published var outgoingTaildropFiles: [TaildropOutgoingFile] = []
     @Published var incomingTaildropFiles: [TaildropIncomingFile] = []
     @Published var taildropFilesWaiting: Bool = false
@@ -86,6 +140,7 @@ class AppState: ObservableObject {
     private var awgPeersLoaded = false
     private var awgPeersLoading = false
     private var awgLastRefresh: Date?
+    private var awgLastRefreshPeerIDs: Set<String> = []
     private let awgRefreshInterval: TimeInterval = 30
 
     /// Reference to VPNManager for IPC. Set by the app at launch.
@@ -112,7 +167,7 @@ class AppState: ObservableObject {
     }
 
     var hasVisibleSession: Bool {
-        currentProfile != nil || selfNode != nil || !peers.isEmpty || pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode
+        currentProfile != nil || selfNode != nil || !peers.isEmpty || pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode || isSwitchingNetworkMode || isRestoringSession
     }
 
     var shouldShowLoginView: Bool {
@@ -127,8 +182,122 @@ class AppState: ObservableObject {
         pendingExitNodeAllowLANAccess ?? prefs?.ExitNodeAllowLANAccess ?? false
     }
 
+    var appNetworkIsActive: Bool {
+        ipnState == .running || ipnState == .starting
+    }
+
     func effectiveVPNIsActive(systemActive: Bool) -> Bool {
-        pendingWantRunning ?? systemActive
+        pendingWantRunning ?? (usesVPNPermission ? systemActive : appNetworkIsActive)
+    }
+
+    func presentInAppBrowser() {
+        guard appNetworkIsActive else { return }
+        isInAppBrowserPresented = true
+    }
+
+    func presentInAppExitNodePicker() {
+        guard appNetworkIsActive else { return }
+        isInAppExitNodePickerPresented = true
+    }
+
+    func dismissInAppExitNodePicker() {
+        isInAppExitNodePickerPresented = false
+    }
+
+    func dismissInAppBrowser() {
+        isInAppBrowserPresented = false
+    }
+
+    func presentInAppTerminal(initialHost: String = "", initialPort: Int = 22, sshHint: String? = nil, autoConnectInitialHost: Bool = false) {
+        guard appNetworkIsActive else { return }
+        inAppTerminalPresentation = InAppTerminalPresentationRequest(
+            initialHost: initialHost,
+            initialPort: initialPort,
+            sshHint: sshHint,
+            autoConnectInitialHost: autoConnectInitialHost
+        )
+    }
+
+    func dismissInAppTerminal() {
+        inAppTerminalPresentation = nil
+    }
+
+    func setUsesVPNPermission(_ enabled: Bool) {
+        guard usesVPNPermission != enabled else { return }
+        guard pendingWantRunning == nil, !isSwitchingNetworkMode else {
+            lastError = "Wait for the current connection change to finish."
+            return
+        }
+
+        let previousMode = usesVPNPermission
+        usesVPNPermission = enabled
+        UserDefaults.standard.set(enabled, forKey: vpnPermissionEnabledKey)
+        UserDefaults.standard.synchronize()
+        isSwitchingNetworkMode = true
+        lastError = nil
+
+        Task {
+            await resetNetworksForPermissionModeChange(from: previousMode, to: enabled)
+        }
+    }
+
+    private func resetNetworksForPermissionModeChange(from previousMode: Bool, to enabled: Bool) async {
+        _ = previousMode
+        let preservedAwgConfig = currentAwgConfig ?? prefs?.AmneziaWG
+        defer {
+            isSwitchingNetworkMode = false
+        }
+
+        loginCompletionPollTask?.cancel()
+        loginCompletionPollTask = nil
+        pendingWantRunning = nil
+        if !isLoggingIn && !loginMayRequireMachineAuth {
+            isAwaitingMachineAuth = false
+        }
+
+        if loginBackend.isRunning {
+            do {
+                try await LocalAPIClient.login(loginBackend).setWantRunning(false, timeout: 1000)
+            } catch {
+                NSLog("Ignoring app backend stop during mode switch: \(error)")
+            }
+        }
+        loginBackend.stop()
+
+        if let vpn = vpnManager {
+            if vpn.isTunnelActive {
+                do {
+                    try await LocalAPIClient.vpn(vpn).setWantRunning(false, timeout: 1000)
+                } catch {
+                    NSLog("Ignoring VPN backend stop during mode switch: \(error)")
+                }
+                await vpn.prepareToDisconnect()
+            }
+            vpn.disconnect()
+            await waitForVPNStopped(vpn)
+            await vpn.resetAfterPermissionModeChange()
+        }
+
+        updateCachedPrefs(wantRunning: false)
+        if let preservedAwgConfig {
+            currentAwgConfig = preservedAwgConfig
+            localAwgStatus = preservedAwgConfig.hasNonDefaultValues
+        }
+        if hasBackendSnapshot {
+            ipnState = .stopped
+            sharedDefaults?.set(IpnState.stopped.rawValue, forKey: IPCConstants.keyIPNState)
+        } else if !isLoggingIn && !isAwaitingMachineAuth {
+            ipnState = .needsLogin
+            sharedDefaults?.set(IpnState.needsLogin.rawValue, forKey: IPCConstants.keyIPNState)
+        }
+        sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
+        sharedDefaults?.synchronize()
+        lastError = nil
+
+        if !enabled {
+            isSwitchingNetworkMode = false
+            resumeAppBackendIfNeeded(vpnActive: false, allowColdStart: hasBackendSnapshot)
+        }
     }
 
     private var hasBackendSnapshot: Bool {
@@ -136,15 +305,15 @@ class AppState: ObservableObject {
     }
 
     private var isBackendTransitionInProgress: Bool {
-        pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode
+        pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode || isSwitchingNetworkMode
     }
 
     private var isPreservingSnapshotForBackendTransition: Bool {
-        hasBackendSnapshot && (pendingWantRunning == true || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode)
+        hasBackendSnapshot && (pendingWantRunning == true || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode || isSwitchingNetworkMode)
     }
 
     private var isAppLoginBackendExpected: Bool {
-        isLoggingIn || isAwaitingMachineAuth || loginMayRequireMachineAuth
+        !usesVPNPermission || isLoggingIn || isAwaitingMachineAuth || loginMayRequireMachineAuth
     }
 
     private var shouldProtectExistingSessionFromLoginStart: Bool {
@@ -152,7 +321,7 @@ class AppState: ObservableObject {
     }
 
     private var canShowMachineAuthDuringLogin: Bool {
-        loginMayRequireMachineAuth || loginBrowserWasPresented || !isLoggingIn
+        loginMayRequireMachineAuth || loginBrowserWasPresented
     }
 
     // MARK: - Initialization
@@ -175,23 +344,12 @@ class AppState: ObservableObject {
 
     private func resetPersistedStateAfterFreshInstallIfNeeded() {
         let defaults = UserDefaults.standard
-        let currentIdentity = currentInstallIdentity()
-        let storedIdentity = defaults.string(forKey: appInstallIdentityKey)
-        let shouldReset = !defaults.bool(forKey: appInstallMarkerKey) || storedIdentity != currentIdentity
-        guard shouldReset else { return }
+        guard !defaults.bool(forKey: appInstallMarkerKey) else { return }
 
         clearSharedLoginState()
         clearPersistedGoState()
         defaults.set(true, forKey: appInstallMarkerKey)
-        defaults.set(currentIdentity, forKey: appInstallIdentityKey)
         defaults.synchronize()
-    }
-
-    private func currentInstallIdentity() -> String {
-        [
-            NSHomeDirectory(),
-            sharedContainerURL?.path ?? "",
-        ].joined(separator: "|")
     }
 
     private func resetStaleLoginState() {
@@ -205,7 +363,7 @@ class AppState: ObservableObject {
     }
 
     private var shouldResumeLoginBackendOnForeground: Bool {
-        isLoggingIn || isAwaitingMachineAuth || loginMayRequireMachineAuth
+        !usesVPNPermission && hasBackendSnapshot || isLoggingIn || isAwaitingMachineAuth || loginMayRequireMachineAuth
     }
 
     private func clearSharedLoginState() {
@@ -304,6 +462,9 @@ class AppState: ObservableObject {
         isUpdatingExitNode = false
         pendingExitNodeID = nil
         pendingExitNodeAllowLANAccess = nil
+        isInAppExitNodePickerPresented = false
+        isInAppBrowserPresented = false
+        inAppTerminalPresentation = nil
         outgoingTaildropFiles = []
         incomingTaildropFiles = []
         taildropFilesWaiting = false
@@ -329,6 +490,7 @@ class AppState: ObservableObject {
         awgPeersLoaded = false
         awgPeersLoading = false
         awgLastRefresh = nil
+        awgLastRefreshPeerIDs = []
         isUpdatingExitNode = false
         pendingExitNodeID = nil
         pendingExitNodeAllowLANAccess = nil
@@ -341,11 +503,12 @@ class AppState: ObservableObject {
     private func updateCachedPrefs(
         wantRunning: Bool? = nil,
         exitNodeID: String? = nil,
+        routeAll: Bool? = nil,
         exitNodeAllowLANAccess: Bool? = nil
     ) {
         prefs = IpnPrefs(
             WantRunning: wantRunning ?? prefs?.WantRunning,
-            RouteAll: prefs?.RouteAll,
+            RouteAll: routeAll ?? prefs?.RouteAll,
             CorpDNS: prefs?.CorpDNS,
             AmneziaWG: prefs?.AmneziaWG,
             ExitNodeID: exitNodeID ?? prefs?.ExitNodeID,
@@ -578,7 +741,7 @@ class AppState: ObservableObject {
     }
 
     private func activeLocalAPIClient() async throws -> LocalAPIClient {
-        if let vpn = vpnManager, vpn.isTunnelActive {
+        if usesVPNPermission, let vpn = vpnManager, vpn.isTunnelActive {
             return .vpn(vpn)
         }
 
@@ -602,17 +765,111 @@ class AppState: ObservableObject {
         return .login(loginBackend)
     }
 
+    func inAppBrowserProxy() async throws -> InAppBrowserProxy {
+        let endpoint = "/localapi/v0/awgscale/browser-proxy"
+        let client = try await activeLocalAPIClient()
+        let response = try await client.raw(
+            method: "GET",
+            endpoint: endpoint,
+            timeout: 5000
+        )
+        return try response.decodedBody(InAppBrowserProxy.self, endpoint: endpoint)
+    }
+
+    func sendInAppTerminalInput(host: String, port: Int, payload: String) async throws -> InAppTerminalResponse {
+        let endpoint = "/localapi/v0/awgscale/tcp-console"
+        let request = InAppTerminalRequest(
+            host: host,
+            port: port,
+            payload: payload,
+            appendNewline: true,
+            timeoutMillis: 8000
+        )
+        let body = try JSONEncoder().encode(request)
+        let response = try await activeLocalAPIClient().raw(
+            method: "POST",
+            endpoint: endpoint,
+            body: body,
+            timeout: 10000
+        )
+        return try response.decodedBody(InAppTerminalResponse.self, endpoint: endpoint)
+    }
+
+    func openInAppSSHSession(host: String, port: Int, username: String, password: String, privateKey: String = "", passphrase: String = "") async throws -> InAppSSHResponse {
+        let endpoint = "/localapi/v0/awgscale/ssh/open"
+        let request = InAppSSHOpenRequest(
+            host: host,
+            port: port,
+            username: username,
+            password: password,
+            privateKey: privateKey,
+            passphrase: passphrase,
+            terminal: "xterm-256color",
+            columns: 80,
+            rows: 24,
+            timeoutMillis: 15000
+        )
+        let body = try JSONEncoder().encode(request)
+        let response = try await activeLocalAPIClient().raw(
+            method: "POST",
+            endpoint: endpoint,
+            body: body,
+            timeout: 20000
+        )
+        return try response.decodedBody(InAppSSHResponse.self, endpoint: endpoint)
+    }
+
+    func sendInAppSSHInput(sessionID: String, input: String) async throws -> InAppSSHResponse {
+        let endpoint = "/localapi/v0/awgscale/ssh/send"
+        let request = InAppSSHSendRequest(sessionID: sessionID, input: input, waitMillis: 35)
+        let body = try JSONEncoder().encode(request)
+        let response = try await activeLocalAPIClient().raw(
+            method: "POST",
+            endpoint: endpoint,
+            body: body,
+            timeout: 5000
+        )
+        return try response.decodedBody(InAppSSHResponse.self, endpoint: endpoint)
+    }
+
+    func readInAppSSHSession(sessionID: String, waitMillis: Int = 100) async throws -> InAppSSHResponse {
+        let endpoint = "/localapi/v0/awgscale/ssh/read"
+        let request = InAppSSHSessionRequest(sessionID: sessionID, waitMillis: waitMillis)
+        let body = try JSONEncoder().encode(request)
+        let response = try await activeLocalAPIClient().raw(
+            method: "POST",
+            endpoint: endpoint,
+            body: body,
+            timeout: 5000
+        )
+        return try response.decodedBody(InAppSSHResponse.self, endpoint: endpoint)
+    }
+
+    func closeInAppSSHSession(sessionID: String) async {
+        let endpoint = "/localapi/v0/awgscale/ssh/close"
+        let request = InAppSSHSessionRequest(sessionID: sessionID)
+        guard let body = try? JSONEncoder().encode(request) else { return }
+        _ = try? await activeLocalAPIClient().raw(
+            method: "POST",
+            endpoint: endpoint,
+            body: body,
+            timeout: 5000
+        )
+    }
+
     private func ensureAppBackendReadyForControlPlane() async throws {
         if loginBackend.isRunning { return }
         guard isAppLoginBackendExpected || !hasBackendSnapshot else {
             throw LoginFlowError.localAPI("VPN backend is not active")
         }
+        let tolerateStartupTransient = hasBackendSnapshot || isBackendTransitionInProgress
 
         try await loginBackend.start { [weak self] data in
             self?.handleLoginBackendNotify(data)
         }
 
         guard let backendState = await loginBackendState() else {
+            if tolerateStartupTransient { return }
             loginBackend.stop()
             throw LoginFlowError.localAPI("No active backend")
         }
@@ -620,6 +877,7 @@ class AppState: ObservableObject {
         ipnState = backendState
         switch backendState {
         case .needsLogin, .noState:
+            if tolerateStartupTransient { return }
             loginBackend.stop()
             throw LoginFlowError.localAPI("No active backend")
         case .needsMachineAuth:
@@ -713,7 +971,6 @@ class AppState: ObservableObject {
         if !nsError.userInfo.isEmpty {
             parts.append("userInfo=\(nsError.userInfo)")
         }
-        parts.append("debug=\(String(reflecting: error))")
         return parts.joined(separator: "; ")
     }
 
@@ -766,7 +1023,9 @@ class AppState: ObservableObject {
             if let finalBackendState = finalBackendState {
                 ipnState = finalBackendState
             }
-            loginBackend.stop()
+            if usesVPNPermission {
+                loginBackend.stop()
+            }
             isAwaitingMachineAuth = false
             loginMayRequireMachineAuth = false
             loginBrowserWasPresented = false
@@ -775,14 +1034,25 @@ class AppState: ObservableObject {
         }
     }
 
-    func resumeAppBackendIfNeeded(vpnActive: Bool) {
+    func resumeAppBackendIfNeeded(vpnActive: Bool, allowColdStart: Bool = false) {
         guard !vpnActive,
               !loginBackend.isRunning,
               !isLoggingIn,
-              shouldResumeLoginBackendOnForeground,
+              (shouldResumeLoginBackendOnForeground || allowColdStart),
               !isBackendTransitionInProgress else { return }
 
+        let coldStart = allowColdStart && !hasBackendSnapshot
+        if coldStart {
+            isRestoringSession = true
+        }
+
         Task {
+            defer {
+                if coldStart {
+                    isRestoringSession = false
+                }
+            }
+
             do {
                 try await loginBackend.start { [weak self] data in
                     self?.handleLoginBackendNotify(data)
@@ -800,9 +1070,13 @@ class AppState: ObservableObject {
 
             switch backendState {
             case .needsLogin, .noState:
-                loginBackend.stop()
+                if coldStart, await restoreProfileOnlyFromLoginBackend() {
+                    ipnState = .stopped
+                } else {
+                    loginBackend.stop()
+                }
             case .needsMachineAuth:
-                guard isLoggingIn || loginMayRequireMachineAuth else {
+                guard canShowMachineAuthDuringLogin else {
                     resetStaleLoginState()
                     return
                 }
@@ -817,6 +1091,12 @@ class AppState: ObservableObject {
     }
 
     func foregroundResume(vpnActive: Bool) {
+        if !usesVPNPermission {
+            guard !isBackendTransitionInProgress else { return }
+            resumeAppBackendIfNeeded(vpnActive: false, allowColdStart: true)
+            return
+        }
+
         if vpnActive {
             loginCompletionPollTask?.cancel()
             loginCompletionPollTask = nil
@@ -1120,6 +1400,11 @@ class AppState: ObservableObject {
 
     /// Toggle VPN on/off via prefs edit.
     func setWantRunning(_ wantRunning: Bool) {
+        if !usesVPNPermission {
+            setAppBackendWantRunning(wantRunning)
+            return
+        }
+
         guard let vpn = vpnManager else { return }
         guard pendingWantRunning != wantRunning else { return }
 
@@ -1127,7 +1412,13 @@ class AppState: ObservableObject {
         updateCachedPrefs(wantRunning: wantRunning)
 
         Task {
-            defer { pendingWantRunning = nil }
+            var shouldRefreshAwgAfterTransition = false
+            defer {
+                pendingWantRunning = nil
+                if shouldRefreshAwgAfterTransition {
+                    refreshAwgStatusForTunnelChange()
+                }
+            }
 
             do {
                 lastError = nil
@@ -1160,6 +1451,7 @@ class AppState: ObservableObject {
 
                 try await connectVPNAndSetWantRunningWithRetry(vpn)
                 await refreshTunnelStatus()
+                shouldRefreshAwgAfterTransition = true
             } catch {
                 lastError = "Failed to update preferences: \(error.localizedDescription)"
                 if wantRunning {
@@ -1171,6 +1463,117 @@ class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func setAppBackendWantRunning(_ wantRunning: Bool) {
+        guard pendingWantRunning != wantRunning else { return }
+
+        pendingWantRunning = wantRunning
+        updateCachedPrefs(wantRunning: wantRunning)
+
+        Task {
+            var shouldRefreshAwgAfterTransition = false
+            defer {
+                pendingWantRunning = nil
+                if shouldRefreshAwgAfterTransition {
+                    refreshAwgStatusForTunnelChange()
+                }
+            }
+
+            do {
+                lastError = nil
+                sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
+
+                if !wantRunning {
+                    if loginBackend.isRunning {
+                        do {
+                            try await LocalAPIClient.login(loginBackend).setWantRunning(false, timeout: 1000)
+                        } catch {
+                            NSLog("Ignoring WantRunning=false persistence during app-only stop: \(error)")
+                        }
+                    }
+                    loginBackend.stop()
+                    ipnState = .stopped
+                    sharedDefaults?.set(IpnState.stopped.rawValue, forKey: IPCConstants.keyIPNState)
+                    sharedDefaults?.synchronize()
+                    return
+                }
+
+                ipnState = .starting
+                sharedDefaults?.set(IpnState.starting.rawValue, forKey: IPCConstants.keyIPNState)
+                sharedDefaults?.synchronize()
+                loginCompletionPollTask?.cancel()
+                loginCompletionPollTask = nil
+
+                try await ensureAppBackendReadyForControlPlane()
+                try await LocalAPIClient.login(loginBackend).setWantRunning(true)
+
+                if let runningError = await waitForAppBackendRunning(requireNetMap: true) {
+                    throw VPNError.backendNotReady(runningError)
+                }
+
+                await fetchCurrentProfileFromLoginBackend()
+                shouldRefreshAwgAfterTransition = true
+            } catch {
+                lastError = "Failed to update app-only connection: \(error.localizedDescription)"
+                updateCachedPrefs(wantRunning: false)
+                ipnState = .stopped
+                sharedDefaults?.set(IpnState.stopped.rawValue, forKey: IPCConstants.keyIPNState)
+                sharedDefaults?.synchronize()
+                if wantRunning {
+                    loginBackend.stop()
+                }
+            }
+        }
+    }
+
+    private func waitForAppBackendRunning(requireNetMap: Bool = false) async -> String? {
+        var lastState = "Starting"
+        let tolerateTransientUnauthenticated = hasBackendSnapshot || isBackendTransitionInProgress
+        let transientUnauthenticatedDeadline = Date().addingTimeInterval(12)
+        let deadline = Date().addingTimeInterval(60)
+
+        while Date() < deadline {
+            guard loginBackend.isRunning else {
+                return "app backend stopped before reaching Running"
+            }
+
+            do {
+                let json = try await LocalAPIClient.login(loginBackend).statusObject(timeout: 1000)
+                if let backendState = json["BackendState"] as? String {
+                    lastState = backendState
+                    if let state = IpnState(backendState: backendState) {
+                        ipnState = state
+                    }
+                    switch backendState {
+                    case "Running":
+                        if !requireNetMap || statusHasNetworkMap(json) {
+                            return nil
+                        }
+                        lastState = "Running without network map"
+                    case "NeedsLogin":
+                        if tolerateTransientUnauthenticated && Date() < transientUnauthenticatedDeadline {
+                            break
+                        }
+                        return "login is required"
+                    case "NeedsMachineAuth":
+                        if tolerateTransientUnauthenticated && Date() < transientUnauthenticatedDeadline {
+                            break
+                        }
+                        isAwaitingMachineAuth = true
+                        return "machine authorization is pending"
+                    default:
+                        break
+                    }
+                }
+            } catch {
+                lastState = error.localizedDescription
+            }
+
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+
+        return "timed out waiting for app backend to run; last state: \(lastState)"
     }
 
     private func connectVPNAndSetWantRunning(_ vpn: VPNManager, requireNetMap: Bool = false) async throws {
@@ -1270,6 +1673,15 @@ class AppState: ObservableObject {
         }
     }
 
+    private func restoreProfileOnlyFromLoginBackend() async -> Bool {
+        do {
+            currentProfile = try await LocalAPIClient.login(loginBackend).currentProfile()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - AWG Sync
 
     /// Load AWG config status for all peers via awg-sync-peers endpoint.
@@ -1288,14 +1700,19 @@ class AppState: ObservableObject {
             return
         }
         guard !isBackendTransitionInProgress else {
-            if showMessages { awgStatusMessage = "VPN is busy, try refreshing again shortly" }
+            if showMessages { awgStatusMessage = "Network is busy, try refreshing again shortly" }
             return
         }
-        if vpnManager?.isTunnelActive != true && hasBackendSnapshot {
+        if usesVPNPermission && vpnManager?.isTunnelActive != true && hasBackendSnapshot {
             if showMessages { awgStatusMessage = "Connect VPN to refresh AWG status" }
             return
         }
-        if !force, awgPeersLoaded, let awgLastRefresh,
+        if !usesVPNPermission && !appNetworkIsActive && hasBackendSnapshot {
+            if showMessages { awgStatusMessage = "Connect app network to refresh AWG status" }
+            return
+        }
+        let currentPeerIDs = Set(peers.map(\.id))
+        if !force, awgPeersLoaded, awgLastRefreshPeerIDs == currentPeerIDs, let awgLastRefresh,
            Date().timeIntervalSince(awgLastRefresh) < awgRefreshInterval {
             if showMessages { awgStatusMessage = "AWG status is already up to date" }
             return
@@ -1318,6 +1735,7 @@ class AppState: ObservableObject {
             if loadedPeers {
                 awgPeersLoaded = true
                 awgLastRefresh = Date()
+                awgLastRefreshPeerIDs = currentPeerIDs
             }
         }
     }
@@ -1431,18 +1849,22 @@ class AppState: ObservableObject {
             }
 
             do {
-                let vpn = try await ensureVPNBackendReadyForAwgSync()
-                awgStatusMessage = "Waiting for peer connectivity..."
-                if let peerReadinessError = await waitForPeerReachableForAwgSync(vpn, peer: peer) {
-                    throw LoginFlowError.localAPI(peerReadinessError)
+                let (client, vpn) = try await ensureBackendReadyForAwgSync()
+                if usesVPNPermission {
+                    awgStatusMessage = "Waiting for peer connectivity..."
+                    if let peerReadinessError = await waitForPeerReachableForAwgSync(client, vpn: vpn, peer: peer) {
+                        throw LoginFlowError.localAPI(peerReadinessError)
+                    }
                 }
                 awgStatusMessage = "Syncing AWG config from \(hostname)..."
                 let request = AwgSyncApplyRequest(nodeKey: nodeKey, timeout: timeout)
-                let appliedConfig = try await LocalAPIClient.vpn(vpn).awgSyncApply(request)
+                let appliedConfig = try await client.awgSyncApply(request)
                 currentAwgConfig = appliedConfig
                 localAwgStatus = appliedConfig.hasNonDefaultValues
-                awgStatusMessage = "AWG config from \(hostname) applied, restarting VPN..."
-                let restarted = await autoReconnectForAwgConfig()
+                awgStatusMessage = usesVPNPermission
+                    ? "AWG config from \(hostname) applied, restarting VPN..."
+                    : "AWG config from \(hostname) applied, restarting app network..."
+                let restarted = await refreshBackendForAwgConfig()
                 _ = await loadLocalAwgStatusOnce(showMessages: false)
                 if restarted {
                     awgStatusMessage = "AWG config from \(hostname) applied successfully"
@@ -1463,24 +1885,67 @@ class AppState: ObservableObject {
 
         awgStatusMessage = config.hasNonDefaultValues ? "Applying AWG config..." : "Clearing AWG config..."
 
-        let vpn = try await ensureVPNBackendReadyForAwgSync()
-        try await LocalAPIClient.vpn(vpn).patchPrefs(.setAmneziaWG(config))
+        let (client, _) = try await ensureBackendReadyForAwgSync()
+        try await client.patchPrefs(.setAmneziaWG(config))
 
         currentAwgConfig = config
         localAwgStatus = config.hasNonDefaultValues
 
-        let restarted = await autoReconnectForAwgConfig()
+        let restarted = await refreshBackendForAwgConfig()
 
         _ = await loadLocalAwgStatusOnce(showMessages: false)
 
         if !restarted {
-            throw LoginFlowError.localAPI(awgStatusMessage ?? "VPN restart failed")
+            throw LoginFlowError.localAPI(awgStatusMessage ?? "Network restart failed")
         }
 
         awgStatusMessage = config.hasNonDefaultValues ? "AWG config applied successfully" : "AWG config cleared"
     }
 
     // MARK: - AWG Helpers
+
+      private func ensureBackendReadyForAwgSync() async throws -> (client: LocalAPIClient, vpn: VPNManager?) {
+          if usesVPNPermission {
+              let vpn = try await ensureVPNBackendReadyForAwgSync()
+              return (.vpn(vpn), vpn)
+          }
+
+          lastError = nil
+          awgStatusMessage = "Preparing app network for AWG sync..."
+
+          try await ensureAppBackendReadyForControlPlane()
+          try await LocalAPIClient.login(loginBackend).setWantRunning(true)
+          if let runningError = await waitForAppBackendRunning(requireNetMap: true) {
+              throw VPNError.backendNotReady(runningError)
+          }
+          await fetchCurrentProfileFromLoginBackend()
+          return (.login(loginBackend), nil)
+      }
+
+      private func refreshBackendForAwgConfig() async -> Bool {
+          if usesVPNPermission {
+              return await autoReconnectForAwgConfig()
+          }
+          return await restartAppBackendForAwgConfig()
+      }
+
+      private func restartAppBackendForAwgConfig() async -> Bool {
+          awgStatusMessage = "AWG config applied, restarting app network..."
+          loginBackend.stop()
+
+          do {
+              try await ensureAppBackendReadyForControlPlane()
+              try await LocalAPIClient.login(loginBackend).setWantRunning(true)
+              if let runningError = await waitForAppBackendRunning(requireNetMap: true) {
+                  throw VPNError.backendNotReady(runningError)
+              }
+              await fetchCurrentProfileFromLoginBackend()
+              return true
+          } catch {
+              awgStatusMessage = "AWG config applied but app network restart failed: \(error.localizedDescription)"
+              return false
+          }
+      }
 
     private func autoReconnectForAwgConfig() async -> Bool {
         guard let vpn = vpnManager else { return false }
@@ -1548,24 +2013,26 @@ class AppState: ObservableObject {
         return vpn
     }
 
-    private func waitForPeerReachableForAwgSync(_ vpn: VPNManager, peer: PeerNode) async -> String? {
+    private func waitForPeerReachableForAwgSync(_ client: LocalAPIClient, vpn: VPNManager?, peer: PeerNode) async -> String? {
         guard let ip = peer.primaryIPv4Address else { return nil }
 
         let deadline = Date().addingTimeInterval(30)
         var lastPingError = "peer did not respond"
 
         while Date() < deadline {
-            switch vpn.updateStatusFromConnection() {
-            case .disconnected, .invalid:
-                return "VPN tunnel stopped before AWG sync could reach peer"
-            case .disconnecting:
-                return "VPN tunnel is disconnecting before AWG sync could reach peer"
-            default:
-                break
+            if let vpn {
+                switch vpn.updateStatusFromConnection() {
+                case .disconnected, .invalid:
+                    return "VPN tunnel stopped before AWG sync could reach peer"
+                case .disconnecting:
+                    return "VPN tunnel is disconnecting before AWG sync could reach peer"
+                default:
+                    break
+                }
             }
 
             do {
-                let response = try await LocalAPIClient.vpn(vpn).ping(ip: ip, timeout: 5000)
+                let response = try await client.ping(ip: ip, timeout: 5000)
                 if response.Err?.isEmpty ?? true {
                     return nil
                 }
@@ -1708,7 +2175,7 @@ class AppState: ObservableObject {
         let targetID = peer.id
         isUpdatingExitNode = true
         pendingExitNodeID = targetID
-        updateCachedPrefs(exitNodeID: targetID)
+        updateCachedPrefs(exitNodeID: targetID, routeAll: true)
         lastError = nil
         sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
 
@@ -1719,12 +2186,14 @@ class AppState: ObservableObject {
             }
 
             do {
-                let vpn = try await ensureVPNBackendRunningForExitNode()
-                try await LocalAPIClient.vpn(vpn).setExitNode(id: targetID)
-                _ = try await waitForVPNPrefs(vpn, description: "exit node selection") { prefs in
-                    (prefs.ExitNodeID ?? "") == targetID
+                let (client, usesSystemTunnel) = try await ensureBackendRunningForExitNode()
+                try await client.setExitNode(id: targetID)
+                _ = try await waitForPrefs(client, description: "exit node selection") { prefs in
+                    (prefs.ExitNodeID ?? "") == targetID && prefs.RouteAll == true
                 }
-                try await waitForTunnelDefaultRoute(enabled: true)
+                if usesSystemTunnel {
+                    try await waitForTunnelDefaultRoute(enabled: true)
+                }
                 lastError = nil
             } catch {
                 prefs = previousPrefs
@@ -1740,7 +2209,7 @@ class AppState: ObservableObject {
         let previousPrefs = prefs
         isUpdatingExitNode = true
         pendingExitNodeID = ""
-        updateCachedPrefs(exitNodeID: "")
+        updateCachedPrefs(exitNodeID: "", routeAll: false)
         lastError = nil
         sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
 
@@ -1751,12 +2220,14 @@ class AppState: ObservableObject {
             }
 
             do {
-                let vpn = try await ensureVPNBackendRunningForExitNode()
-                try await LocalAPIClient.vpn(vpn).setExitNode(id: "")
-                _ = try await waitForVPNPrefs(vpn, description: "exit node clearing") { prefs in
-                    (prefs.ExitNodeID ?? "").isEmpty
+                let (client, usesSystemTunnel) = try await ensureBackendRunningForExitNode()
+                try await client.setExitNode(id: "")
+                _ = try await waitForPrefs(client, description: "exit node clearing") { prefs in
+                    (prefs.ExitNodeID ?? "").isEmpty && prefs.RouteAll != true
                 }
-                try await waitForTunnelDefaultRoute(enabled: false)
+                if usesSystemTunnel {
+                    try await waitForTunnelDefaultRoute(enabled: false)
+                }
                 lastError = nil
             } catch {
                 prefs = previousPrefs
@@ -1783,9 +2254,9 @@ class AppState: ObservableObject {
             }
 
             do {
-                let vpn = try await ensureVPNBackendRunningForExitNode()
-                try await LocalAPIClient.vpn(vpn).setExitNodeAllowLANAccess(allow)
-                _ = try await waitForVPNPrefs(vpn, description: "exit node LAN access") { prefs in
+                let (client, _) = try await ensureBackendRunningForExitNode()
+                try await client.setExitNodeAllowLANAccess(allow)
+                _ = try await waitForPrefs(client, description: "exit node LAN access") { prefs in
                     (prefs.ExitNodeAllowLANAccess ?? false) == allow
                 }
                 lastError = nil
@@ -1799,9 +2270,25 @@ class AppState: ObservableObject {
     private func refreshPrefsFromActiveBackend(timeout: Int = 3000) async {
         do {
             prefs = try await activeLocalAPIClient().ipnPrefs(timeout: timeout)
+            updateLocalAwgStatusFromCachedPrefs()
         } catch {
             // Notify updates from the backend will refresh prefs shortly.
         }
+    }
+
+    private func ensureBackendRunningForExitNode() async throws -> (client: LocalAPIClient, usesSystemTunnel: Bool) {
+        if usesVPNPermission {
+            let vpn = try await ensureVPNBackendRunningForExitNode()
+            return (.vpn(vpn), true)
+        }
+
+        try await ensureAppBackendReadyForControlPlane()
+        try await LocalAPIClient.login(loginBackend).setWantRunning(true)
+        if let runningError = await waitForAppBackendRunning(requireNetMap: true) {
+            throw VPNError.backendNotReady(runningError)
+        }
+        await fetchCurrentProfileFromLoginBackend()
+        return (.login(loginBackend), false)
     }
 
     private func ensureVPNBackendRunningForExitNode() async throws -> VPNManager {
@@ -1821,8 +2308,8 @@ class AppState: ObservableObject {
         return vpn
     }
 
-    private func waitForVPNPrefs(
-        _ vpn: VPNManager,
+    private func waitForPrefs(
+        _ client: LocalAPIClient,
         description: String,
         matches: (IpnPrefs) -> Bool
     ) async throws -> IpnPrefs {
@@ -1830,7 +2317,7 @@ class AppState: ObservableObject {
 
         for _ in 0..<30 {
             do {
-                let currentPrefs = try await LocalAPIClient.vpn(vpn).ipnPrefs(timeout: 1000)
+                let currentPrefs = try await client.ipnPrefs(timeout: 1000)
                 prefs = currentPrefs
                 if matches(currentPrefs) {
                     return currentPrefs

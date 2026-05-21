@@ -7,6 +7,7 @@ struct MainView: View {
     @State private var showTaildropPrompt = false
     @State private var openTaildropFromPrompt = false
     @State private var promptedTaildropRevision = 0
+    @State private var selectedPeerID: String?
 
     /// Currently selected exit node (if any).
     private var currentExitNode: PeerNode? {
@@ -22,9 +23,30 @@ struct MainView: View {
         appState.peers.filter { !$0.isMullvadNode }
     }
 
+    private var selectedPeer: PeerNode? {
+        guard let selectedPeerID else { return nil }
+        return appState.peers.first { $0.id == selectedPeerID }
+    }
+
+    private var awgScanTaskID: String {
+        let peerIDs = visiblePeers.map(\.id).joined(separator: ",")
+        return "\(appState.usesVPNPermission)-\(vpnIsActive)-\(appState.ipnState.rawValue)-\(peerIDs)"
+    }
+
     private var connectionTitle: String {
         if let pending = appState.pendingWantRunning {
             return pending ? "Connecting" : "Disconnecting"
+        }
+
+        if !appState.usesVPNPermission {
+            switch appState.ipnState {
+            case .running:
+                return "Connected in App"
+            case .starting:
+                return "Connecting"
+            default:
+                return "Disconnected"
+            }
         }
 
         switch vpnManager.vpnStatus {
@@ -82,7 +104,7 @@ struct MainView: View {
                 }
 
                 // Exit Node section
-                if vpnIsActive {
+                if appState.usesVPNPermission, vpnIsActive {
                     Section {
                         NavigationLink(destination: ExitNodeView()) {
                             HStack {
@@ -110,6 +132,25 @@ struct MainView: View {
                                 Spacer()
                             }
                         }
+                    }
+                } else if !appState.usesVPNPermission {
+                    Section {
+                        NavigationLink(destination: InAppToolsView()) {
+                            HStack {
+                                Image(systemName: "square.grid.2x2")
+                                    .foregroundColor(.accentColor)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Built-in Apps")
+                                        .font(.body)
+                                    Text(vpnIsActive ? "Browser and Terminal" : "Connect to use app-only tools")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                            }
+                        }
+                        .opacity(vpnIsActive ? 1 : 0.45)
                     }
                 }
 
@@ -150,18 +191,38 @@ struct MainView: View {
                             .foregroundColor(.secondary)
                     }
                     ForEach(visiblePeers, id: \.id) { peer in
-                        NavigationLink(destination: PeerDetailView(peer: peer)) {
-                            PeerRow(peer: peer, appState: appState)
+                        PeerRow(peer: peer, appState: appState) {
+                            selectedPeerID = peer.id
                         }
                     }
                 }
             }
             .navigationTitle("AwgScale")
             .background(
-                NavigationLink(destination: TaildropView(), isActive: $openTaildropFromPrompt) {
-                    EmptyView()
+                Group {
+                    NavigationLink(destination: TaildropView(), isActive: $openTaildropFromPrompt) {
+                        EmptyView()
+                    }
+                    .hidden()
+
+                    NavigationLink(isActive: Binding(
+                        get: { selectedPeerID != nil },
+                        set: { isActive in
+                            if !isActive {
+                                selectedPeerID = nil
+                            }
+                        }
+                    )) {
+                        if let selectedPeer {
+                            PeerDetailView(peer: selectedPeer)
+                        } else {
+                            EmptyView()
+                        }
+                    } label: {
+                        EmptyView()
+                    }
+                    .hidden()
                 }
-                .hidden()
             )
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -172,6 +233,9 @@ struct MainView: View {
             }
             .onAppear {
                 presentTaildropPromptIfNeeded()
+            }
+            .task(id: awgScanTaskID) {
+                appState.loadAwgStatusIfNeeded()
             }
             .onChange(of: appState.taildropInboxRevision) { _ in
                 presentTaildropPromptIfNeeded()
@@ -200,6 +264,7 @@ struct MainView: View {
 struct PeerRow: View {
     let peer: PeerNode
     @ObservedObject var appState: AppState
+    let openDetails: () -> Void
 
     private var hasAwgConfig: Bool {
         appState.peerHasAwgConfig(peer)
@@ -211,36 +276,42 @@ struct PeerRow: View {
 
     var body: some View {
         HStack {
-            Circle()
-                .fill(peer.online ? Color.green : Color.gray)
-                .frame(width: 8, height: 8)
+            Button(action: openDetails) {
+                HStack {
+                    Circle()
+                        .fill(peer.online ? Color.green : Color.gray)
+                        .frame(width: 8, height: 8)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Text(peer.displayName)
-                        .font(.body)
-                    if peer.isCurrentDevice {
-                        Text("This device")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.15))
-                            .cornerRadius(4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text(peer.displayName)
+                                .font(.body)
+                            if peer.isCurrentDevice {
+                                Text("This device")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.accentColor.opacity(0.15))
+                                    .cornerRadius(4)
+                            }
+                            if hasAwgConfig {
+                                Text("\u{2605}")
+                                    .font(.subheadline)
+                                    .foregroundColor(Color(red: 1.0, green: 0.84, blue: 0.0)) // Gold
+                            }
+                        }
+                        Text(peer.addresses.first ?? "")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-                    if hasAwgConfig {
-                        Text("\u{2605}")
-                            .font(.subheadline)
-                            .foregroundColor(Color(red: 1.0, green: 0.84, blue: 0.0)) // Gold
-                    }
+
+                    Spacer()
                 }
-                Text(peer.addresses.first ?? "")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
+            .buttonStyle(.plain)
+            .contentShape(Rectangle())
 
-            Spacer()
-
-            if !peer.isCurrentDevice {
+            if !peer.isCurrentDevice && hasAwgConfig {
                 Button {
                     appState.syncAwgConfigFromPeer(peer)
                 } label: {
@@ -254,7 +325,7 @@ struct PeerRow: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
-                .disabled(isSyncing || !peer.online)
+                  .disabled(isSyncing || !peer.online)
             }
 
             if let os = peer.os, !os.isEmpty {
@@ -262,6 +333,13 @@ struct PeerRow: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
+
+            Button(action: openDetails) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.vertical, 2)
     }

@@ -132,6 +132,7 @@ func (app *App) callLocalAPI(timeoutMillis int, method, endpoint string, header 
 	if app.localAPIHandler == nil {
 		return nil, fmt.Errorf("localapi handler not ready")
 	}
+	app.refreshUsableDERPMapForLocalAPI(endpoint)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(uint64(timeoutMillis)*uint64(time.Millisecond)))
 	defer cancel()

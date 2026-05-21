@@ -83,8 +83,17 @@ struct PeerDetailView: View {
                                 .foregroundColor(.blue)
                         }
                     }
-                    
-                    if isCurrentExitNode {
+
+                          if !appState.appNetworkIsActive {
+                              HStack {
+                                  Image(systemName: "lock.fill")
+                                      .foregroundColor(.secondary)
+                                  Text("Connect first")
+                                      .foregroundColor(.secondary)
+                                  Spacer()
+                              }
+                              .opacity(0.55)
+                          } else if isCurrentExitNode {
                         Button(role: .destructive) {
                             appState.clearExitNode()
                         } label: {
@@ -156,18 +165,63 @@ struct PeerDetailView: View {
             } header: {
                 Text("Network")
             }
+
+            if !peer.isCurrentDevice && !peer.sshTargetHost.isEmpty {
+                Section {
+                    Button {
+                        appState.presentInAppTerminal(
+                            initialHost: peer.primaryIPv4Address ?? peer.sshTargetHost,
+                            sshHint: peer.sshCapabilityLabel,
+                            autoConnectInitialHost: true
+                        )
+                    } label: {
+                        HStack {
+                            Image(systemName: "terminal")
+                                .foregroundColor(.accentColor)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("SSH")
+                                Text(peer.sshCapabilityLabel)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundColor(Color(uiColor: .tertiaryLabel))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } header: {
+                    Text("Actions")
+                }
+            }
             
             // Diagnostics section
             if !peer.isCurrentDevice && peer.primaryIPv4Address != nil {
                 Section {
-                    NavigationLink {
-                        PingView(peer: peer)
-                    } label: {
+                      if appState.usesVPNPermission {
+                          NavigationLink {
+                              PingView(peer: peer)
+                          } label: {
+                              HStack {
+                                  Image(systemName: "waveform.path")
+                                      .foregroundColor(.accentColor)
+                                  Text("Ping")
+                              }
+                          }
+                      } else {
                         HStack {
                             Image(systemName: "waveform.path")
-                                .foregroundColor(.accentColor)
+                                  .foregroundColor(.secondary)
                             Text("Ping")
+                              Spacer()
+                              Text("VPN required")
+                                  .font(.caption)
+                                  .foregroundColor(.secondary)
                         }
+                          .opacity(0.55)
                     }
                 } header: {
                     Text("Diagnostics")

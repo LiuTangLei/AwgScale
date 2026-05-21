@@ -23,6 +23,31 @@ struct LoginView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(isOn: Binding(
+                    get: { appState.usesVPNPermission },
+                    set: { appState.setUsesVPNPermission($0) }
+                )) {
+                    HStack {
+                        Text("Enable VPN Permission")
+                            .font(.headline)
+                        if appState.isSwitchingNetworkMode {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+
+                Text(appState.usesVPNPermission ? "System-wide mode lets every app use the tailnet." : "App-only mode keeps tailnet access inside AwgScale.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(14)
+            .background(Color.secondary.opacity(0.10))
+            .cornerRadius(12)
+            .padding(.horizontal, 32)
+            .disabled(appState.isLoggingIn || appState.isSwitchingNetworkMode)
+
             Button(action: {
                 appState.startLogin()
             }) {
@@ -42,6 +67,8 @@ struct LoginView: View {
             } label: {
                 Text("Use Headscale or a custom server")
                     .font(.footnote.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
             }
             .buttonStyle(.plain)
             .foregroundColor(.accentColor)

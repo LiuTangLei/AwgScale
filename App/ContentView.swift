@@ -36,6 +36,53 @@ struct ContentView: View {
                 }
             }
         }
+        .fullScreenCover(isPresented: Binding(
+            get: { appState.isInAppExitNodePickerPresented },
+            set: { presented in
+                if !presented {
+                    appState.dismissInAppExitNodePicker()
+                }
+            }
+        )) {
+            NavigationView {
+                ExitNodeView(showsAllowLANAccess: false)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close") {
+                                appState.dismissInAppExitNodePicker()
+                            }
+                        }
+                    }
+            }
+            .environmentObject(appState)
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { appState.isInAppBrowserPresented },
+            set: { presented in
+                if !presented {
+                    appState.dismissInAppBrowser()
+                }
+            }
+        )) {
+            TailnetBrowserView()
+                .environmentObject(appState)
+        }
+        .fullScreenCover(item: Binding(
+            get: { appState.inAppTerminalPresentation },
+            set: { presentation in
+                if presentation == nil {
+                    appState.dismissInAppTerminal()
+                }
+            }
+        )) { presentation in
+            TailnetTerminalView(
+                initialHost: presentation.initialHost,
+                initialPort: presentation.initialPort,
+                sshHint: presentation.sshHint,
+                autoConnectInitialHost: presentation.autoConnectInitialHost
+            )
+            .environmentObject(appState)
+        }
     }
 }
 

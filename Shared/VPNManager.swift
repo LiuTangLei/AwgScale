@@ -247,6 +247,14 @@ class VPNManager: ObservableObject {
         updateStatusFromConnection()
     }
 
+    func resetAfterPermissionModeChange() async {
+        manager?.connection.stopVPNTunnel()
+        await waitForTunnelStopped()
+        manager = nil
+        needsConfigurationInstall = true
+        await loadManager()
+    }
+
     // MARK: - IPC: App → Extension
 
     /// Send a raw message to the Packet Tunnel Extension and receive a response.

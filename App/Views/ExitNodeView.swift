@@ -5,6 +5,7 @@ import SwiftUI
 struct ExitNodeView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    var showsAllowLANAccess = true
     
     @State private var searchText: String = ""
     
@@ -91,7 +92,7 @@ struct ExitNodeView: View {
             }
             
             // Allow LAN access toggle
-            if currentExitNode != nil {
+            if showsAllowLANAccess, currentExitNode != nil {
                 Section {
                     Toggle("Allow LAN Access", isOn: Binding(
                         get: { appState.effectiveExitNodeAllowLANAccess },

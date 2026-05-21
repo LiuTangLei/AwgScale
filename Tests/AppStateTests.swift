@@ -252,6 +252,27 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(state.peers.isEmpty)
     }
 
+    func testUnauthenticatedNotifyPreservesAwgSnapshotDuringPermissionModeSwitch() {
+        let state = AppState()
+        state.currentProfile = LoginProfile(ID: "profile-1", Name: "lei", Key: nil, UserProfile: nil, NetworkProfile: nil, LocalUserID: nil, ControlURL: "https://ctl.example")
+        state.prefs = IpnPrefs(WantRunning: true, AmneziaWG: .empty, ExitNodeID: nil, ExitNodeAllowLANAccess: nil, ControlURL: "https://ctl.example", Hostname: "phone")
+        state.selfNode = PeerNode(from: .init(ID: 1, StableID: "self", Key: nil, Name: "phone.", ComputedName: nil, Hostinfo: nil, Addresses: ["100.64.0.1/32"], Online: true, OS: nil, UserID: nil, KeyExpiry: nil, IsExitNode: nil, AllowedIPs: nil), isSelf: true, userProfile: nil)
+        state.peers = [state.selfNode!]
+        state.isSwitchingNetworkMode = true
+
+        let json = """
+        {"State": 1}
+        """.data(using: .utf8)!
+
+        state.handleNotify(json)
+
+        XCTAssertEqual(state.ipnState, .needsLogin)
+        XCTAssertNotNil(state.currentProfile)
+        XCTAssertNotNil(state.prefs?.AmneziaWG)
+        XCTAssertNotNil(state.selfNode)
+        XCTAssertFalse(state.peers.isEmpty)
+    }
+
     func testStartLoginDoesNotClearVisibleSession() {
         let state = AppState()
         state.ipnState = .running
