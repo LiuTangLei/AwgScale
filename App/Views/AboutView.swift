@@ -297,7 +297,7 @@ private enum OpenSourceCatalog {
         GoRuntimeModule(path: "golang.org/x/time", version: "v0.12.0", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/tools", version: "v0.44.0", sourceNote: nil),
         GoRuntimeModule(path: "gvisor.dev/gvisor", version: "v0.0.0-20260224225140-573d5e7127a8", sourceNote: nil),
-        GoRuntimeModule(path: "tailscale.com", version: "v1.98.8", sourceNote: "source replaced by github.com/LiuTangLei/tailscale")
+        GoRuntimeModule(path: "tailscale.com", version: "v1.98.10", sourceNote: "source replaced by github.com/LiuTangLei/tailscale")
     ]
 }
 
