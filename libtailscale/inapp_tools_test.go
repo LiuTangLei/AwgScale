@@ -2,6 +2,9 @@ package libtailscale
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -118,5 +121,42 @@ func TestInAppSSHWaitForOutputReturnsOnAppend(t *testing.T) {
 	}
 	if truncated {
 		t.Fatal("drainOutput() reported truncated output")
+	}
+}
+
+func TestInAppSSHResponseRemovesNaturallyClosedSession(t *testing.T) {
+	session := &inAppSSHSession{
+		done:        make(chan struct{}),
+		outputReady: make(chan struct{}, 1),
+	}
+	session.appendOutput([]byte("goodbye"))
+	session.markClosed()
+
+	const sessionID = "closed-session"
+	app := &App{
+		sshSessions: map[string]*inAppSSHSession{sessionID: session},
+	}
+	recorder := httptest.NewRecorder()
+	app.writeSSHResponse(recorder, http.StatusOK, sessionID, session)
+
+	if _, ok := app.inAppSSHSession(sessionID); ok {
+		t.Fatal("naturally closed SSH session remained registered")
+	}
+	session.mu.Lock()
+	resourcesClosed := session.resourcesClosed
+	session.mu.Unlock()
+	if !resourcesClosed {
+		t.Fatal("naturally closed SSH session resources were not released")
+	}
+
+	var response inAppSSHResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Active {
+		t.Fatal("naturally closed SSH session was reported active")
+	}
+	if response.Body != "goodbye" {
+		t.Fatalf("response body = %q, want goodbye", response.Body)
 	}
 }

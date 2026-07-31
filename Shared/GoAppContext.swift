@@ -659,9 +659,17 @@ class GoAppContext: NSObject, LibtailscaleAppContextProtocol {
             throw NSError(domain: "GoAppContext", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "Failed to load key reference"])
         }
-        
-        // Xcode 27: compiler confirms `as? SecKey` always succeeds for CoreFoundation types,
-        // so use force cast which is safe and preserves runtime type checking.
+
+        guard CFGetTypeID(cfItem) == SecKeyGetTypeID() else {
+            throw NSError(
+                domain: "GoAppContext",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Keychain item is not a private-key reference"]
+            )
+        }
+
+        // CoreFoundation's SecKey bridge is not conditionally castable in
+        // Swift, so validate its type ID before performing the required cast.
         let privateKey = cfItem as! SecKey
         
         GoAppContext.setLoadedKey(keyID, key: privateKey)

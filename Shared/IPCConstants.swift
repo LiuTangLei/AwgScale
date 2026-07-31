@@ -51,6 +51,9 @@ enum IPCConstants {
     static let keyTaildropPromptedInboxRevision = "taildrop_prompted_inbox_revision"
     /// Last completed Taildrop file name for foreground prompts.
     static let keyTaildropLastFileName = "taildrop_last_file_name"
+    /// Whether the main app selected system-wide VPN mode. The Share
+    /// Extension must not start PacketTunnel while app-only mode is selected.
+    static let keyUsesVPNPermission = "uses_vpn_permission"
 
     // MARK: - Darwin Notification names
 
@@ -68,6 +71,47 @@ let sharedDefaults = UserDefaults(suiteName: IPCConstants.appGroupID)
 let sharedContainerURL: URL? = FileManager.default.containerURL(
     forSecurityApplicationGroupIdentifier: IPCConstants.appGroupID
 )
+
+func persistSharedVPNPermissionMode(
+    _ enabled: Bool,
+    defaults: UserDefaults? = sharedDefaults
+) {
+    defaults?.set(enabled, forKey: IPCConstants.keyUsesVPNPermission)
+    defaults?.synchronize()
+}
+
+func sharedVPNPermissionModeEnabled(
+    defaultValue: Bool = false,
+    defaults: UserDefaults? = sharedDefaults
+) -> Bool {
+    defaults?.synchronize()
+    return defaults?.object(forKey: IPCConstants.keyUsesVPNPermission) as? Bool
+        ?? defaultValue
+}
+
+/// Returns a single safe filename for copying an item-provider result into the
+/// shared container. Suggested names are controlled by the sharing app, so
+/// reduce them to a basename and reject path-navigation components.
+func safeSharedFileName(suggestedName: String?, fallbackName: String) -> String {
+    for candidate in [suggestedName, fallbackName] {
+        guard let candidate else { continue }
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { continue }
+
+        let basename = (trimmed as NSString).lastPathComponent
+            .replacingOccurrences(of: "\\", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !basename.isEmpty,
+              basename != ".",
+              basename != "..",
+              !basename.contains("/"),
+              basename.rangeOfCharacter(from: .controlCharacters) == nil else {
+            continue
+        }
+        return basename
+    }
+    return "file"
+}
 
 // MARK: - IPC Messages (App ↔ Extension via sendProviderMessage)
 

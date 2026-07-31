@@ -5,12 +5,157 @@ import XCTest
 @MainActor
 final class AppStateTests: XCTestCase {
 
+    func testLoginControlServerResolutionUsesExplicitOfficialDefault() {
+        XCTAssertEqual(resolvedLoginControlServerURL(nil), officialControlServerURL)
+        XCTAssertEqual(resolvedLoginControlServerURL("   "), officialControlServerURL)
+        XCTAssertEqual(
+            resolvedLoginControlServerURL("headscale.example.com"),
+            "https://headscale.example.com"
+        )
+        XCTAssertEqual(
+            resolvedLoginControlServerURL("http://localhost:8080/control"),
+            "http://localhost:8080/control"
+        )
+    }
+
+    func testCustomControlServerValidationRejectsNonOriginComponents() {
+        XCTAssertNil(normalizedCustomControlServerURL("ftp://headscale.example.com"))
+        XCTAssertNil(normalizedCustomControlServerURL("https://user:secret@headscale.example.com"))
+        XCTAssertNil(normalizedCustomControlServerURL("https://headscale.example.com?server=other"))
+        XCTAssertNil(normalizedCustomControlServerURL("https://headscale.example.com/#callback"))
+        XCTAssertNil(normalizedCustomControlServerURL("https://"))
+    }
+
+    func testOfficialLoginRejectsHeadscaleAndUnsafeAuthenticationURLs() {
+        XCTAssertTrue(
+            isAuthenticationURLAllowed(
+                "https://login.tailscale.com/a/example",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertTrue(
+            isAuthenticationURLAllowed(
+                "https://controlplane.tailscale.com/a/example",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertTrue(
+            isAuthenticationURLAllowed(
+                "https://console.tailscale.com/admin",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertTrue(
+            isAuthenticationURLAllowed(
+                "https://tailscale.com/login",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertFalse(
+            isAuthenticationURLAllowed(
+                "https://headscale.example.com/register/example",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertFalse(
+            isAuthenticationURLAllowed(
+                "https://tailscale.com.attacker.example/login",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertFalse(
+            isAuthenticationURLAllowed(
+                "http://login.tailscale.com/a/example",
+                controlServerURL: officialControlServerURL
+            )
+        )
+        XCTAssertFalse(
+            isAuthenticationURLAllowed(
+                "awgscale://auth/callback",
+                controlServerURL: officialControlServerURL
+            )
+        )
+
+        // A custom control plane can legitimately hand off to an external IdP.
+        XCTAssertTrue(
+            isAuthenticationURLAllowed(
+                "https://accounts.example.org/oauth",
+                controlServerURL: "https://headscale.example.com"
+            )
+        )
+        XCTAssertFalse(
+            isAuthenticationURLAllowed(
+                "http://accounts.example.org/oauth",
+                controlServerURL: "https://headscale.example.com"
+            )
+        )
+        XCTAssertTrue(
+            isAuthenticationURLAllowed(
+                "http://accounts.example.org/oauth",
+                controlServerURL: "http://headscale.example.com"
+            )
+        )
+    }
+
+    func testSharedCallbackStateCannotReplaceActiveInAppLogin() throws {
+        let defaults = try XCTUnwrap(sharedDefaults)
+        let oldBrowseURL = defaults.object(forKey: IPCConstants.keyBrowseToURL)
+        let oldLoginFinished = defaults.object(forKey: IPCConstants.keyLoginFinished)
+        defer {
+            if let oldBrowseURL {
+                defaults.set(oldBrowseURL, forKey: IPCConstants.keyBrowseToURL)
+            } else {
+                defaults.removeObject(forKey: IPCConstants.keyBrowseToURL)
+            }
+            if let oldLoginFinished {
+                defaults.set(oldLoginFinished, forKey: IPCConstants.keyLoginFinished)
+            } else {
+                defaults.removeObject(forKey: IPCConstants.keyLoginFinished)
+            }
+        }
+
+        let state = AppState(vpnPermissionCapability: false)
+        state.isLoggingIn = true
+        state.browseToURL = "https://login.tailscale.com/a/current"
+        defaults.set(
+            "https://headscale.example.com/register/stale",
+            forKey: IPCConstants.keyBrowseToURL
+        )
+        defaults.set(true, forKey: IPCConstants.keyLoginFinished)
+
+        state.loadSharedState()
+
+        XCTAssertTrue(state.isLoggingIn)
+        XCTAssertEqual(state.browseToURL, "https://login.tailscale.com/a/current")
+        XCTAssertNil(defaults.object(forKey: IPCConstants.keyBrowseToURL))
+        XCTAssertNil(defaults.object(forKey: IPCConstants.keyLoginFinished))
+    }
+
     func testDefaultVPNPermissionRequiresCurrentCapability() {
         XCTAssertFalse(defaultVPNPermissionEnabled(hasVPNCapability: false, stored: true))
         XCTAssertFalse(defaultVPNPermissionEnabled(hasVPNCapability: false, stored: nil))
         XCTAssertTrue(defaultVPNPermissionEnabled(hasVPNCapability: true, stored: nil))
         XCTAssertTrue(defaultVPNPermissionEnabled(hasVPNCapability: true, stored: true))
         XCTAssertFalse(defaultVPNPermissionEnabled(hasVPNCapability: true, stored: false))
+    }
+
+    func testVPNPermissionModeIsSharedWithExtensions() throws {
+        let suiteName = "top.yesican.awgscale.tests.mode.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(sharedVPNPermissionModeEnabled(defaults: defaults))
+        XCTAssertTrue(
+            sharedVPNPermissionModeEnabled(defaultValue: true, defaults: defaults)
+        )
+        persistSharedVPNPermissionMode(false, defaults: defaults)
+        XCTAssertFalse(
+            sharedVPNPermissionModeEnabled(defaultValue: true, defaults: defaults)
+        )
+        persistSharedVPNPermissionMode(true, defaults: defaults)
+        XCTAssertTrue(
+            sharedVPNPermissionModeEnabled(defaultValue: false, defaults: defaults)
+        )
     }
 
     func testNetworkExtensionEntitlementParsingRequiresPacketTunnelProvider() {
@@ -352,5 +497,95 @@ final class AppStateTests: XCTestCase {
         state.handleNotify(badData)
 
         XCTAssertNotNil(state.lastError)
+    }
+
+    func testTailnetLockSigningQRPayloadValidation() throws {
+        let payload = """
+          tailscale://sign-device/v1/?nk=nodekey%3Aabc&tp=tlpub%3Adef&dn=iPhone&os=iOS&em=user%40example.com&hm=0123456789abcdef
+        """
+
+        XCTAssertEqual(
+            try validatedTailnetLockSigningURL(from: payload),
+            payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        XCTAssertTrue(
+            try validatedTailnetLockSigningURL(
+                from: "TAILSCALE://SIGN-DEVICE/v1/?nk=x&tp=x&dn=x&os=x&em=x&hm=x"
+            ).hasPrefix("tailscale://sign-device/")
+        )
+        XCTAssertThrowsError(
+            try validatedTailnetLockSigningURL(
+                from: "https://sign-device/v1/?nk=x&tp=x&dn=x&os=x&em=x&hm=x"
+            )
+        )
+        XCTAssertThrowsError(
+            try validatedTailnetLockSigningURL(
+                from: "tailscale://sign-device/v2/?nk=x&tp=x&dn=x&os=x&em=x&hm=x"
+            )
+        )
+        XCTAssertThrowsError(
+            try validatedTailnetLockSigningURL(
+                from: "tailscale://sign-device/v1/?nk=x&tp=x&dn=x&os=x&em=x"
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TailnetLockSigningURLValidationError,
+                .missingParameter("hm")
+            )
+        }
+    }
+
+    func testTailscaleTimestampParserSupportsFractionalAndWholeSeconds() {
+        XCTAssertNotNil(parsedTailscaleTimestamp("2026-07-31T12:34:56Z"))
+        XCTAssertNotNil(parsedTailscaleTimestamp("2026-07-31T12:34:56.123456789Z"))
+        XCTAssertNil(parsedTailscaleTimestamp(""))
+        XCTAssertNil(parsedTailscaleTimestamp("not-a-date"))
+    }
+
+    func testHighSeverityHealthNotificationsAreStableAndFiltered() {
+        let health = HealthState(Warnings: [
+            "dns-broken": UnhealthyState(
+                WarnableCode: "dns-broken",
+                Severity: "high",
+                Title: "DNS unavailable",
+                Text: "MagicDNS cannot resolve names.",
+                BrokenSince: nil,
+                ImpactsConnectivity: true
+            ),
+            "minor": UnhealthyState(
+                WarnableCode: "minor",
+                Severity: "low",
+                Title: "Minor issue",
+                Text: "No action required.",
+                BrokenSince: nil,
+                ImpactsConnectivity: false
+            ),
+        ])
+
+        let first = highSeverityHealthNotifications(from: health)
+        let second = highSeverityHealthNotifications(from: health)
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual(
+            first.first?.identifier,
+            healthNotificationIdentifier(
+                for: "dns-broken",
+                title: "DNS unavailable",
+                message: "MagicDNS cannot resolve names."
+            )
+        )
+        XCTAssertEqual(first.first?.title, "DNS unavailable")
+        XCTAssertNotEqual(
+            first.first?.identifier,
+            healthNotificationIdentifier(
+                for: "dns-broken",
+                title: "DNS unavailable",
+                message: "Updated warning text."
+            )
+        )
+        XCTAssertTrue(
+            highSeverityHealthNotifications(from: Optional<HealthState>.none).isEmpty
+        )
     }
 }

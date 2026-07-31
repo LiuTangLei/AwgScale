@@ -6,6 +6,7 @@ enum ShareInputError: LocalizedError {
     case sharedContainerUnavailable
     case unsupportedItem
     case vpnPermissionRequired
+    case systemVPNModeRequired
     case loginRequired
     case machineAuthRequired
     case vpnUnavailable(String)
@@ -18,6 +19,8 @@ enum ShareInputError: LocalizedError {
         case .unsupportedItem: return "This item cannot be sent as a file"
         case .vpnPermissionRequired:
             return "AwgScale needs VPN permission before Share Sheet sending can start it. Open AwgScale, tap Connect, and allow the VPN prompt."
+        case .systemVPNModeRequired:
+            return "Share Sheet Taildrop requires System VPN mode. Open AwgScale and switch Connection Mode to System VPN, then share again."
         case .loginRequired:
             return "AwgScale is not logged in. Open AwgScale and sign in, then share again."
         case .machineAuthRequired:
@@ -29,7 +32,7 @@ enum ShareInputError: LocalizedError {
 
     var opensContainingApp: Bool {
         switch self {
-        case .vpnPermissionRequired, .loginRequired, .machineAuthRequired, .vpnUnavailable, .backendUnavailable:
+        case .vpnPermissionRequired, .systemVPNModeRequired, .loginRequired, .machineAuthRequired, .vpnUnavailable, .backendUnavailable:
             return true
         case .noFiles, .sharedContainerUnavailable, .unsupportedItem:
             return false
@@ -40,6 +43,8 @@ enum ShareInputError: LocalizedError {
         switch self {
         case .vpnPermissionRequired:
             return "Open AwgScale to Allow VPN"
+        case .systemVPNModeRequired:
+            return "Open AwgScale to Use System VPN"
         case .loginRequired:
             return "Open AwgScale to Log In"
         case .machineAuthRequired:
@@ -65,18 +70,25 @@ enum ShareInputFileLoader {
         let providers = (extensionContext?.inputItems as? [NSExtensionItem])?
             .flatMap { $0.attachments ?? [] } ?? []
 
-        var copiedFiles: [URL] = []
-        for provider in providers {
-            if let fileURL = try await copyFile(from: provider, to: destinationDirectory) {
-                copiedFiles.append(fileURL)
+        do {
+            var copiedFiles: [URL] = []
+            for provider in providers {
+                try Task.checkCancellation()
+                if let fileURL = try await copyFile(from: provider, to: destinationDirectory) {
+                    try Task.checkCancellation()
+                    copiedFiles.append(fileURL)
+                }
             }
-        }
 
-        if copiedFiles.isEmpty {
+            try Task.checkCancellation()
+            guard !copiedFiles.isEmpty else {
+                throw ShareInputError.noFiles
+            }
+            return copiedFiles
+        } catch {
             try? FileManager.default.removeItem(at: destinationDirectory)
-            throw ShareInputError.noFiles
+            throw error
         }
-        return copiedFiles
     }
 
     private static func copyFile(from provider: NSItemProvider, to directory: URL) async throws -> URL? {
@@ -120,10 +132,7 @@ enum ShareInputFileLoader {
     }
 
     private static func uniqueDestinationURL(in directory: URL, suggestedName: String?, fallbackName: String) throws -> URL {
-        let rawName = [suggestedName, fallbackName]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !$0.isEmpty } ?? "file"
-        let safeName = rawName.replacingOccurrences(of: "/", with: "-")
+        let safeName = safeSharedFileName(suggestedName: suggestedName, fallbackName: fallbackName)
         let baseName = (safeName as NSString).deletingPathExtension
         let pathExtension = (safeName as NSString).pathExtension
 

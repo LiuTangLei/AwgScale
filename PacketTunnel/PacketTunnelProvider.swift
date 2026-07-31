@@ -91,6 +91,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let started = GoBridge.start(dataDir: dataDir, directFileRoot: directFileRoot, hwAttestation: false)
         if !started {
             logger.error("startTunnel: Go backend failed to start")
+            stopDefaultRouteMonitor()
             completeStartWithError("Go backend start failed", code: 2, completionHandler: completionHandler)
             return
         }
@@ -118,6 +119,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if let error = error {
                 self?.logger.error("startTunnel: setTunnelNetworkSettings failed: \(error.localizedDescription)")
                 self?.publishLastError("setTunnelNetworkSettings failed: \(error.localizedDescription)")
+                self?.cleanupStartedBackend()
                 completionHandler(error)
                 return
             }
@@ -727,7 +729,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             packetsToSystem = 0
             bytesToSystem = 0
             packetBridgeHasDefaultRoute = false
+            lastPacketsToSystemProgressTime = Date()
+            packetsFromSystemAtLastToSystemProgress = 0
             lastPacketBridgeProgressLogTime = Date.distantPast
+            lastUnderlayRefreshTime = nil
         }
         hasPublishedBackendSnapshot = false
     }
@@ -743,6 +748,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func cleanupStartedBackend() {
         markTunnelStopping()
+        if let notifyHandle {
+            GoBridge.stopNotifications(notifyHandle)
+            self.notifyHandle = nil
+        }
         #if canImport(Libtailscale)
         if let app = GoBridge.application {
             LibtailscaleSetTunnelConfigCallback(app, nil)
@@ -924,8 +933,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.logger.error("dropping packet with unknown IP version")
                 return
             }
+            guard self.packetFlow.writePackets([packet], withProtocols: [protocolFamily]) else {
+                self.logger.error("packetFlow rejected an outbound packet")
+                return
+            }
             self.recordPacketToSystem(byteCount: packet.count)
-            self.packetFlow.writePackets([packet], withProtocols: [protocolFamily])
         }
     }
 
@@ -968,7 +980,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let now = Date()
         let stalledFor = now.timeIntervalSince(lastPacketsToSystemProgressTime)
-        let incomingSinceProgress = packetsFromSystem - packetsFromSystemAtLastToSystemProgress
+        let incomingSinceProgress = nonnegativeCounterDelta(
+            current: packetsFromSystem,
+            baseline: packetsFromSystemAtLastToSystemProgress
+        )
 
         if stalledFor >= packetBridgeProgressLogInterval,
            now.timeIntervalSince(lastPacketBridgeProgressLogTime) >= packetBridgeProgressLogInterval {

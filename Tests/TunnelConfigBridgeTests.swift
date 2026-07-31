@@ -77,6 +77,11 @@ final class TunnelConfigBridgeTests: XCTestCase {
         XCTAssertFalse(tunnelConfigHasDefaultRoute(["not-a-route"]))
     }
 
+    func testCounterDeltaDoesNotUnderflowAfterLifecycleReset() {
+        XCTAssertEqual(nonnegativeCounterDelta(current: 12, baseline: 7), 5)
+        XCTAssertEqual(nonnegativeCounterDelta(current: 0, baseline: 500), 0)
+    }
+
     // MARK: - TunnelConfigFromGo decoding
 
     /// JSON shape produced by the Go side: must round-trip without loss.

@@ -81,6 +81,7 @@ struct TaildropShareView: View {
                     Button("Done") {
                         finish()
                     }
+                    .disabled(activePeerID != nil)
                 }
             }
         }
@@ -168,6 +169,8 @@ struct TaildropShareView: View {
 
     @MainActor
     private func ensureVPNReadyForShare() async throws {
+        try requireSystemVPNModeForShare()
+
         loadingMessage = "Checking VPN..."
         let status = await vpnManager.refreshStatus()
 
@@ -200,6 +203,7 @@ struct TaildropShareView: View {
 
     @MainActor
     private func connectVPNAndSetWantRunningOnceForShare() async throws {
+        try requireSystemVPNModeForShare()
         loadingMessage = "Starting VPN..."
         try await vpnManager.connectTunnel()
 
@@ -208,12 +212,26 @@ struct TaildropShareView: View {
             throw classifyBackendReadinessError(readinessError)
         }
 
+        do {
+            try requireSystemVPNModeForShare()
+        } catch {
+            vpnManager.disconnect()
+            throw error
+        }
+
         loadingMessage = "Starting Tailscale..."
         try await LocalAPIClient.vpn(vpnManager).setWantRunning(true, timeout: 10000)
 
         loadingMessage = "Waiting for Tailscale..."
         if let runningError = await waitForBackendRunningForShare() {
             throw classifyBackendReadinessError(runningError)
+        }
+    }
+
+    @MainActor
+    private func requireSystemVPNModeForShare() throws {
+        guard sharedVPNPermissionModeEnabled() else {
+            throw ShareInputError.systemVPNModeRequired
         }
     }
 
@@ -392,8 +410,15 @@ struct TaildropShareView: View {
 
     private func openContainingApp() {
         guard let url = URL(string: "awgscale://open") else { return }
-        extensionContext?.open(url) { _ in
-            finish()
+        extensionContext?.open(url) { opened in
+            Task { @MainActor in
+                if opened {
+                    finish()
+                } else {
+                    error = "AwgScale could not be opened. Open it from the Home Screen and try again."
+                    canOpenApp = false
+                }
+            }
         }
     }
 

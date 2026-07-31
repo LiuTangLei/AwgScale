@@ -77,3 +77,9 @@ func tunnelConfigHasDefaultRoute(_ routes: [String]) -> Bool {
         return isIPv4DefaultRoute(address: parsed.address, prefixLen: parsed.prefixLen)
     }
 }
+
+/// Computes a monotonic-counter delta without trapping if a lifecycle reset
+/// moved the current counter behind a baseline captured by an earlier run.
+func nonnegativeCounterDelta(current: UInt64, baseline: UInt64) -> UInt64 {
+    current >= baseline ? current - baseline : 0
+}

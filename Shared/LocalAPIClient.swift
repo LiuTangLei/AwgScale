@@ -82,8 +82,8 @@ struct LocalAPIClient {
     }
 
     func newProfile() async throws {
-        let endpoint = "/localapi/v0/profiles/new"
-        let resp = try await execute("POST", endpoint, nil, 30000, true)
+        let endpoint = "/localapi/v0/profiles/"
+        let resp = try await execute("PUT", endpoint, nil, 30000, true)
         try resp.requireSuccess(endpoint: endpoint)
     }
 
@@ -156,8 +156,8 @@ struct LocalAPIClient {
     }
 
     func login(authKey: String) async throws {
-        let endpoint = "/localapi/v0/login"
-        let body = try JSONEncoder().encode(["authKey": authKey])
+        let endpoint = "/localapi/v0/start"
+        let body = try JSONEncoder().encode(["AuthKey": authKey])
         let resp = try await execute("POST", endpoint, body, 30000, true)
         try resp.requireSuccess(endpoint: endpoint)
     }
@@ -205,7 +205,7 @@ struct LocalAPIClient {
 
     func bugReportLogs() async throws -> String {
         let endpoint = "/localapi/v0/bugreport"
-        let resp = try await execute("GET", endpoint, nil, 30000, true)
+        let resp = try await execute("POST", endpoint, nil, 30000, true)
         let data = try resp.bodyData(endpoint: endpoint)
         return String(data: data, encoding: .utf8) ?? ""
     }

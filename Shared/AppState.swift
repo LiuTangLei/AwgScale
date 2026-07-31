@@ -18,7 +18,91 @@ private enum LoginFlowError: Error, LocalizedError {
 private let appInstallMarkerKey = "top.yesican.awgscale.install-marker.v3"
 private let vpnPermissionEnabledKey = "top.yesican.awgscale.vpn-permission-enabled.v1"
 private let packetTunnelProviderEntitlementKey = "com.apple.developer.networking.networkextension"
+let officialControlServerURL = "https://controlplane.tailscale.com"
 let systemVPNUnavailableMessage = "This install was not signed with the Network Extension entitlement. AwgScale will use app-only mode."
+
+/// Normalize a user-entered Headscale/control-plane URL.
+///
+/// Control URLs are server origins (optionally with a path), so credentials,
+/// queries, and fragments are rejected instead of being forwarded to the Go
+/// backend. HTTP remains supported for local/self-hosted development servers.
+func normalizedCustomControlServerURL(_ value: String) -> String? {
+    let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedValue.isEmpty else { return nil }
+
+    let valueWithScheme = trimmedValue.contains("://")
+        ? trimmedValue
+        : "https://\(trimmedValue)"
+    guard valueWithScheme.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+          var components = URLComponents(string: valueWithScheme),
+          let scheme = components.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
+          let host = components.host,
+          !host.isEmpty,
+          components.user == nil,
+          components.password == nil,
+          components.query == nil,
+          components.fragment == nil else {
+        return nil
+    }
+
+    components.scheme = scheme
+    return components.url?.absoluteString
+}
+
+/// Resolve the control plane for a login request. A missing or blank custom
+/// value always means the official Tailscale control plane; it must not inherit
+/// a previously selected Headscale server from persisted backend preferences.
+func resolvedLoginControlServerURL(_ requestedValue: String?) -> String? {
+    guard let requestedValue,
+          !requestedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return officialControlServerURL
+    }
+    return normalizedCustomControlServerURL(requestedValue)
+}
+
+private func isOfficialControlServerURL(_ value: String) -> Bool {
+    guard let components = URLComponents(string: value),
+          components.scheme?.lowercased() == "https",
+          let host = components.host?.lowercased() else {
+        return false
+    }
+    let path = components.percentEncodedPath
+    return (host == "controlplane.tailscale.com" || host == "login.tailscale.com")
+        && (path.isEmpty || path == "/")
+        && components.user == nil
+        && components.password == nil
+        && components.query == nil
+        && components.fragment == nil
+}
+
+/// Validate the initial BrowseToURL emitted by the active login backend.
+///
+/// Official login URLs mirror the Go backend's HTTPS `tailscale.com` boundary.
+/// The active-attempt ID prevents a delayed Headscale notification from opening
+/// during a later official login. Custom control planes may hand authentication
+/// off to an IdP, so only the safe web schemes are required for those flows.
+func isAuthenticationURLAllowed(_ value: String, controlServerURL: String) -> Bool {
+    guard let components = URLComponents(string: value),
+          let scheme = components.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
+          let host = components.host?.lowercased(),
+          !host.isEmpty,
+          components.user == nil,
+          components.password == nil else {
+        return false
+    }
+
+    if isOfficialControlServerURL(controlServerURL) {
+        return scheme == "https"
+            && (host == "tailscale.com" || host.hasSuffix(".tailscale.com"))
+    }
+
+    if scheme == "https" {
+        return true
+    }
+    return URLComponents(string: controlServerURL)?.scheme?.lowercased() == "http"
+}
 
 func defaultVPNPermissionEnabled(
     hasVPNCapability: Bool = hasPacketTunnelProviderEntitlement(),
@@ -177,14 +261,23 @@ class AppState: ObservableObject {
     private var awgLastRefresh: Date?
     private var awgLastRefreshPeerIDs: Set<String> = []
     private let awgRefreshInterval: TimeInterval = 30
+    private var notificationSyncTask: Task<Void, Never>?
+    private var notificationSyncGeneration: UInt64 = 0
 
     /// Reference to VPNManager for IPC. Set by the app at launch.
     weak var vpnManager: VPNManager?
     private let loginBackend = AppLoginBackend()
     private var isCompletingAppLogin = false
+    private var loginStartTask: Task<Void, Never>?
     private var loginCompletionPollTask: Task<Void, Never>?
+    private var activeLoginAttemptID: UUID?
+    private var activeLoginControlServerURL: String?
     private var loginMachineAuthPending = false
     private var loginBrowserWasPresented = false
+    private var profileBackendLeaseCount = 0
+    private var profileStartedTemporaryBackend = false
+    private var profileBackendStartTask: Task<Void, Error>?
+    private var isResumingAppBackend = false
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.1"
@@ -268,10 +361,15 @@ class AppState: ObservableObject {
 
     func setUsesVPNPermission(_ enabled: Bool) {
         guard usesVPNPermission != enabled else { return }
+        guard profileBackendLeaseCount == 0 else {
+            lastError = "Wait for profile management to finish before changing network mode."
+            return
+        }
         guard !enabled || canUseVPNPermission else {
             usesVPNPermission = false
             UserDefaults.standard.set(false, forKey: vpnPermissionEnabledKey)
             UserDefaults.standard.synchronize()
+            persistSharedVPNPermissionMode(false)
             lastError = systemVPNUnavailableMessage
             return
         }
@@ -284,6 +382,7 @@ class AppState: ObservableObject {
         usesVPNPermission = enabled
         UserDefaults.standard.set(enabled, forKey: vpnPermissionEnabledKey)
         UserDefaults.standard.synchronize()
+        persistSharedVPNPermissionMode(enabled)
         isSwitchingNetworkMode = true
         lastError = nil
 
@@ -356,7 +455,9 @@ class AppState: ObservableObject {
     }
 
     private var isBackendTransitionInProgress: Bool {
-        pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress || isUpdatingExitNode || isSwitchingNetworkMode
+        pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress ||
+            isUpdatingExitNode || isSwitchingNetworkMode || profileBackendLeaseCount > 0 ||
+            isResumingAppBackend
     }
 
     private var isPreservingSnapshotForBackendTransition: Bool {
@@ -364,7 +465,8 @@ class AppState: ObservableObject {
     }
 
     private var isAppLoginBackendExpected: Bool {
-        !usesVPNPermission || isLoggingIn || isAwaitingMachineAuth || loginMachineAuthPending
+        !usesVPNPermission || isLoggingIn || isAwaitingMachineAuth ||
+            loginMachineAuthPending || profileBackendLeaseCount > 0
     }
 
     private var shouldProtectExistingSessionFromLoginStart: Bool {
@@ -389,6 +491,7 @@ class AppState: ObservableObject {
         self.usesVPNPermission = defaultVPNPermissionEnabled(hasVPNCapability: vpnPermissionCapability)
 
         resetPersistedStateAfterFreshInstallIfNeeded()
+        persistSharedVPNPermissionMode(usesVPNPermission)
 
         // Load initial state from App Group
         loadSharedState()
@@ -414,6 +517,7 @@ class AppState: ObservableObject {
     }
 
     private func resetStaleLoginState() {
+        invalidateActiveLoginAttempt()
         loginCompletionPollTask?.cancel()
         loginCompletionPollTask = nil
         loginBackend.stop()
@@ -424,7 +528,8 @@ class AppState: ObservableObject {
     }
 
     private var shouldResumeLoginBackendOnForeground: Bool {
-        !usesVPNPermission && hasBackendSnapshot || isLoggingIn || isAwaitingMachineAuth || loginMachineAuthPending
+        !usesVPNPermission && hasBackendSnapshot || isLoggingIn || isAwaitingMachineAuth ||
+            loginMachineAuthPending || profileBackendLeaseCount > 0
     }
 
     private func clearSharedLoginState() {
@@ -493,14 +598,6 @@ class AppState: ObservableObject {
             defaults.set(String(data: netMapData, encoding: .utf8), forKey: IPCConstants.keyNetMapJSON)
         }
 
-        if let url = notify.BrowseToURL {
-            defaults.set(url, forKey: IPCConstants.keyBrowseToURL)
-        }
-
-        if notify.LoginFinished != nil {
-            defaults.removeObject(forKey: IPCConstants.keyBrowseToURL)
-        }
-
         if !shouldClearBackendSnapshot, let health = notify.Health,
            let healthData = try? JSONEncoder().encode(health) {
             defaults.set(String(data: healthData, encoding: .utf8), forKey: IPCConstants.keyHealthJSON)
@@ -510,6 +607,7 @@ class AppState: ObservableObject {
     }
 
     private func clearInMemorySessionState() {
+        invalidateActiveLoginAttempt()
         ipnState = .needsLogin
         clearBackendSnapshotState()
         lastError = nil
@@ -555,6 +653,7 @@ class AppState: ObservableObject {
         isUpdatingExitNode = false
         pendingExitNodeID = nil
         pendingExitNodeAllowLANAccess = nil
+        synchronizeNotificationsFromCurrentState()
     }
 
     private func shouldClearBackendSnapshot(for state: IpnState) -> Bool {
@@ -611,21 +710,26 @@ class AppState: ObservableObject {
             }
         }
 
-        // BrowseToURL (login)
-        let newBrowseURL = defaults.string(forKey: IPCConstants.keyBrowseToURL)
-        if newBrowseURL != browseToURL {
-            browseToURL = newBrowseURL
-        }
-        if newBrowseURL != nil {
-            loginBrowserWasPresented = true
-        }
-
-        // LoginFinished
-        if defaults.bool(forKey: IPCConstants.keyLoginFinished) {
-            isLoggingIn = false
-            browseToURL = nil
+        // Interactive login is owned by the in-app backend. While it is active,
+        // never let delayed PacketTunnel/shared-defaults state replace its URL
+        // or complete the wrong login attempt.
+        if isLoggingIn {
+            defaults.removeObject(forKey: IPCConstants.keyBrowseToURL)
             defaults.removeObject(forKey: IPCConstants.keyLoginFinished)
-            finishAppLogin()
+        } else {
+            let newBrowseURL = defaults.string(forKey: IPCConstants.keyBrowseToURL)
+            if newBrowseURL != browseToURL {
+                browseToURL = newBrowseURL
+            }
+            if newBrowseURL != nil {
+                loginBrowserWasPresented = true
+            }
+
+            if defaults.bool(forKey: IPCConstants.keyLoginFinished) {
+                browseToURL = nil
+                defaults.removeObject(forKey: IPCConstants.keyLoginFinished)
+                finishAppLogin()
+            }
         }
 
         // Health
@@ -666,6 +770,8 @@ class AppState: ObservableObject {
         } else {
             lastError = sharedLastError
         }
+
+        synchronizeNotificationsFromCurrentState()
     }
 
     private func shouldSuppressSharedLastError(_ message: String?) -> Bool {
@@ -710,8 +816,12 @@ class AppState: ObservableObject {
         }
 
         if let url = notify.BrowseToURL {
-            browseToURL = url
-            loginBrowserWasPresented = true
+            if fromLoginBackend {
+                applyLoginBackendBrowseURL(url)
+            } else {
+                browseToURL = url
+                loginBrowserWasPresented = true
+            }
         }
 
         if notify.LoginFinished != nil {
@@ -737,6 +847,27 @@ class AppState: ObservableObject {
         if !clearsBackendSnapshot, notify.FilesWaiting != nil {
             taildropFilesWaiting = true
         }
+
+        synchronizeNotificationsFromCurrentState()
+    }
+
+    private func applyLoginBackendBrowseURL(_ url: String) {
+        guard isLoggingIn,
+              activeLoginAttemptID != nil,
+              let controlServerURL = activeLoginControlServerURL else {
+            return
+        }
+
+        guard isAuthenticationURLAllowed(url, controlServerURL: controlServerURL) else {
+            failActiveLogin(
+                "The login server returned an unexpected authentication URL. "
+                    + "Official sign-in only opens Tailscale authentication pages."
+            )
+            return
+        }
+
+        browseToURL = url
+        loginBrowserWasPresented = true
     }
 
     private func updateLocalAwgStatusFromCachedPrefs() {
@@ -772,6 +903,33 @@ class AppState: ObservableObject {
             code != "login-state" && state.WarnableCode != "login-state"
         }
         return HealthState(Warnings: filteredWarnings)
+    }
+
+    private func synchronizeNotificationsFromCurrentState() {
+        notificationSyncGeneration &+= 1
+        let generation = notificationSyncGeneration
+        let keyExpiry = parsedTailscaleTimestamp(selfNode?.keyExpiry)
+        let currentHealth = health
+
+        notificationSyncTask?.cancel()
+        notificationSyncTask = Task { [weak self] in
+            guard let self,
+                  !Task.isCancelled,
+                  notificationSyncGeneration == generation else {
+                return
+            }
+
+            await NotificationManager.shared.synchronizeState(
+                keyExpiry: keyExpiry,
+                health: currentHealth
+            )
+
+            guard !Task.isCancelled,
+                  notificationSyncGeneration == generation else {
+                return
+            }
+            notificationSyncTask = nil
+        }
     }
 
     private func updatePeers(from netMap: NetworkMap) {
@@ -956,64 +1114,121 @@ class AppState: ObservableObject {
     /// Start interactive login flow without enabling the system VPN tunnel.
     /// Login runs a temporary in-app Go backend so the browser auth flow can
     /// complete before the user chooses to turn AwgScale on.
-    func startLogin(controlURL: String = "") {
+    func startLogin(controlURL: String? = nil) {
         guard !isLoggingIn else { return }
         guard !shouldProtectExistingSessionFromLoginStart else {
             lastError = "Already signed in. Disconnect or log out before starting a new login."
             return
         }
+        guard let selectedControlServerURL = resolvedLoginControlServerURL(controlURL) else {
+            lastError = "Enter a valid http or https control server URL."
+            return
+        }
 
+        invalidateActiveLoginAttempt()
         loginBackend.stop()
         clearSharedLoginState()
         clearPersistedGoState()
         loginCompletionPollTask?.cancel()
         loginCompletionPollTask = nil
+        let loginAttemptID = UUID()
+        activeLoginAttemptID = loginAttemptID
+        activeLoginControlServerURL = selectedControlServerURL
         isLoggingIn = true
         isAwaitingMachineAuth = false
         loginMachineAuthPending = false
         loginBrowserWasPresented = false
         lastError = nil
 
-        Task {
+        loginStartTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.activeLoginAttemptID == loginAttemptID {
+                    self.loginStartTask = nil
+                }
+            }
+
             do {
                 try await loginBackend.start { [weak self] data in
-                    self?.handleLoginBackendNotify(data)
+                    self?.handleLoginBackendNotify(data, loginAttemptID: loginAttemptID)
                 }
             } catch {
-                lastError = "Login backend failed to start: \(describeError(error))"
-                isLoggingIn = false
+                failActiveLogin(
+                    "Login backend failed to start: \(describeError(error))",
+                    loginAttemptID: loginAttemptID
+                )
                 return
             }
 
+            guard isActiveLoginAttempt(loginAttemptID) else { return }
             await setLoginBackendWantRunning(false)
+            guard isActiveLoginAttempt(loginAttemptID) else { return }
 
-            // If a custom control URL is provided, set it before login
-            if !controlURL.isEmpty {
-                do {
-                    let prefs = MaskedPrefs.setControlURL(controlURL)
-                    let updatedPrefsData = try await editLoginBackendPrefs(prefs)
-                    try await startLoginBackend(updatePrefsData: updatedPrefsData)
-                } catch {
-                    lastError = "Failed to set control server: \(describeError(error))"
-                    isLoggingIn = false
-                    loginBackend.stop()
-                    return
-                }
+            // Set the control URL for every attempt. In particular, official
+            // login must overwrite any previously persisted Headscale URL.
+            do {
+                let prefs = MaskedPrefs.setControlURL(selectedControlServerURL)
+                let updatedPrefsData = try await editLoginBackendPrefs(prefs)
+                guard isActiveLoginAttempt(loginAttemptID) else { return }
+                try await startLoginBackend(updatePrefsData: updatedPrefsData)
+            } catch {
+                failActiveLogin(
+                    "Failed to set control server: \(describeError(error))",
+                    loginAttemptID: loginAttemptID
+                )
+                return
             }
 
+            guard isActiveLoginAttempt(loginAttemptID) else { return }
             do {
                 let resp = try await loginBackend.startLoginInteractive()
+                guard isActiveLoginAttempt(loginAttemptID) else { return }
                 if let error = resp.error {
-                    lastError = "Login request failed: \(error)"
-                    isLoggingIn = false
-                    loginBackend.stop()
+                    failActiveLogin(
+                        "Login request failed: \(error)",
+                        loginAttemptID: loginAttemptID
+                    )
                 }
             } catch {
-                lastError = "Login request failed: \(describeError(error))"
-                isLoggingIn = false
-                loginBackend.stop()
+                failActiveLogin(
+                    "Login request failed: \(describeError(error))",
+                    loginAttemptID: loginAttemptID
+                )
             }
         }
+    }
+
+    private func isActiveLoginAttempt(_ loginAttemptID: UUID) -> Bool {
+        !Task.isCancelled
+            && isLoggingIn
+            && activeLoginAttemptID == loginAttemptID
+    }
+
+    private func invalidateActiveLoginAttempt() {
+        loginStartTask?.cancel()
+        loginStartTask = nil
+        activeLoginAttemptID = nil
+        activeLoginControlServerURL = nil
+    }
+
+    private func failActiveLogin(_ message: String, loginAttemptID: UUID? = nil) {
+        if let loginAttemptID, activeLoginAttemptID != loginAttemptID {
+            return
+        }
+
+        invalidateActiveLoginAttempt()
+        loginCompletionPollTask?.cancel()
+        loginCompletionPollTask = nil
+        isLoggingIn = false
+        isAwaitingMachineAuth = false
+        loginMachineAuthPending = false
+        loginBrowserWasPresented = false
+        browseToURL = nil
+        loginBackend.stop()
+        sharedDefaults?.removeObject(forKey: IPCConstants.keyBrowseToURL)
+        sharedDefaults?.removeObject(forKey: IPCConstants.keyLoginFinished)
+        sharedDefaults?.synchronize()
+        lastError = message
     }
 
     private func editLoginBackendPrefs(_ prefs: MaskedPrefs) async throws -> Data {
@@ -1035,24 +1250,38 @@ class AppState: ObservableObject {
         return parts.joined(separator: "; ")
     }
 
-    private func handleLoginBackendNotify(_ data: Data) {
+    private func handleLoginBackendNotify(_ data: Data, loginAttemptID: UUID? = nil) {
+        if let loginAttemptID, activeLoginAttemptID != loginAttemptID {
+            return
+        }
+
         do {
             let notify = try JSONDecoder().decode(IpnNotify.self, from: data)
             persistLoginBackendSnapshot(notify)
             applyNotify(notify, fromLoginBackend: true)
         } catch {
-            lastError = "Failed to decode notification: \(error.localizedDescription)"
+            if loginAttemptID == nil || activeLoginAttemptID == loginAttemptID {
+                lastError = "Failed to decode notification: \(error.localizedDescription)"
+            }
         }
     }
 
     func loginBrowserDidDismiss() {
+        guard isLoggingIn else { return }
         loginBrowserWasPresented = true
         browseToURL = nil
-        startLoginCompletionPolling()
+        if activeLoginAttemptID != nil || loginBackend.isRunning {
+            startLoginCompletionPolling()
+        }
+    }
+
+    func loginBrowserDidFail(_ error: Error) {
+        failActiveLogin("Unable to open the sign-in page: \(error.localizedDescription)")
     }
 
     private func finishAppLogin() {
         guard loginBackend.isRunning else {
+            invalidateActiveLoginAttempt()
             fetchCurrentProfile()
             return
         }
@@ -1085,6 +1314,9 @@ class AppState: ObservableObject {
             loginMachineAuthPending = false
             loginBrowserWasPresented = false
             isLoggingIn = false
+            activeLoginAttemptID = nil
+            activeLoginControlServerURL = nil
+            loginStartTask = nil
             isCompletingAppLogin = false
         }
     }
@@ -1097,12 +1329,15 @@ class AppState: ObservableObject {
               !isBackendTransitionInProgress else { return }
 
         let coldStart = allowColdStart && !hasBackendSnapshot
+        isResumingAppBackend = true
         if coldStart {
             isRestoringSession = true
         }
 
-        Task {
+        Task { [weak self] in
+            guard let self else { return }
             defer {
+                isResumingAppBackend = false
                 if coldStart {
                     isRestoringSession = false
                 }
@@ -1146,6 +1381,11 @@ class AppState: ObservableObject {
     }
 
     func foregroundResume(vpnActive: Bool) {
+        // Profile operations may be awaiting LocalAPI on a temporary in-app
+        // backend. Let the lease release it instead of interrupting the request
+        // during a foreground transition.
+        guard profileBackendLeaseCount == 0 else { return }
+
         if !usesVPNPermission {
             guard !isBackendTransitionInProgress else { return }
             resumeAppBackendIfNeeded(vpnActive: false, allowColdStart: true)
@@ -1153,6 +1393,7 @@ class AppState: ObservableObject {
         }
 
         if vpnActive {
+            invalidateActiveLoginAttempt()
             loginCompletionPollTask?.cancel()
             loginCompletionPollTask = nil
             isLoggingIn = false
@@ -1440,6 +1681,10 @@ class AppState: ObservableObject {
 
     /// Log out and clear all state.
     func logout() {
+        guard profileBackendLeaseCount == 0 else {
+            lastError = "Wait for profile management to finish before logging out."
+            return
+        }
         loginCompletionPollTask?.cancel()
         loginCompletionPollTask = nil
         clearInMemorySessionState()
@@ -1465,6 +1710,10 @@ class AppState: ObservableObject {
 
     /// Toggle VPN on/off via prefs edit.
     func setWantRunning(_ wantRunning: Bool) {
+        guard profileBackendLeaseCount == 0 else {
+            lastError = "Wait for profile management to finish before changing the connection."
+            return
+        }
         if !usesVPNPermission {
             setAppBackendWantRunning(wantRunning)
             return
@@ -1709,14 +1958,165 @@ class AppState: ObservableObject {
 
     /// Fetch the current login profile from the backend.
     func fetchCurrentProfile() {
-        guard let vpn = vpnManager else { return }
-
         Task {
             do {
-                currentProfile = try await LocalAPIClient.vpn(vpn).currentProfile()
+                currentProfile = try await activeLocalAPIClient().currentProfile()
             } catch {
                 // Profile fetch is best-effort; don't show error to user
             }
+        }
+    }
+
+    private struct ProfileClientLease {
+        let client: LocalAPIClient
+        let usesLoginBackend: Bool
+    }
+
+    private func acquireProfileClient() async throws -> ProfileClientLease {
+        guard !isBackendTransitionInProgress else {
+            throw LoginFlowError.localAPI("Network backend is busy")
+        }
+        guard !isLoggingIn,
+              !isAwaitingMachineAuth,
+              !isCompletingAppLogin,
+              !loginMachineAuthPending else {
+            throw LoginFlowError.localAPI("Finish the current sign-in before managing profiles")
+        }
+
+        profileBackendLeaseCount += 1
+        if usesVPNPermission, let vpn = vpnManager {
+            var vpnStatus = vpn.updateStatusFromConnection()
+            if vpnStatus == .invalid {
+                // The manager loads asynchronously at app launch. Resolve the
+                // real system status before deciding that it is safe to start
+                // another Go backend against the shared state directory.
+                vpnStatus = await vpn.refreshStatus()
+            }
+            switch vpnStatus {
+            case .connected, .reasserting:
+                return ProfileClientLease(client: .vpn(vpn), usesLoginBackend: false)
+            case .connecting, .disconnecting:
+                profileBackendLeaseCount = max(0, profileBackendLeaseCount - 1)
+                throw LoginFlowError.localAPI("Wait for the VPN transition to finish")
+            default:
+                break
+            }
+        }
+
+        do {
+            if let startTask = profileBackendStartTask {
+                try await startTask.value
+            } else if !loginBackend.isRunning {
+                if usesVPNPermission {
+                    profileStartedTemporaryBackend = true
+                }
+                let handlesNotifications = !usesVPNPermission
+                let startTask = Task { [weak self] in
+                    guard let self else {
+                        throw LoginFlowError.localAPI("Profile backend was released")
+                    }
+                    try await loginBackend.start { [weak self] data in
+                        guard handlesNotifications else { return }
+                        self?.handleLoginBackendNotify(data)
+                    }
+                }
+                profileBackendStartTask = startTask
+                do {
+                    try await startTask.value
+                    profileBackendStartTask = nil
+                } catch {
+                    profileBackendStartTask = nil
+                    throw error
+                }
+            }
+        } catch {
+            profileBackendLeaseCount = max(0, profileBackendLeaseCount - 1)
+            if profileBackendLeaseCount == 0, profileStartedTemporaryBackend {
+                profileStartedTemporaryBackend = false
+                loginBackend.stop()
+            }
+            throw error
+        }
+
+        return ProfileClientLease(client: .login(loginBackend), usesLoginBackend: true)
+    }
+
+    private func releaseProfileClient(_ lease: ProfileClientLease) {
+        profileBackendLeaseCount = max(0, profileBackendLeaseCount - 1)
+        if lease.usesLoginBackend,
+           profileBackendLeaseCount == 0,
+           profileStartedTemporaryBackend {
+            profileStartedTemporaryBackend = false
+            loginBackend.stop()
+        }
+    }
+
+    private func updateProfileFromManagementBackend(_ profile: LoginProfile) {
+        let profileChanged = currentProfile?.ID != profile.ID
+        if profileChanged, usesVPNPermission, profileStartedTemporaryBackend {
+            clearBackendSnapshotState()
+            ipnState = .stopped
+            if let defaults = sharedDefaults {
+                clearSharedBackendSnapshot(defaults)
+                defaults.set(IpnState.stopped.rawValue, forKey: IPCConstants.keyIPNState)
+                defaults.synchronize()
+            }
+        }
+        currentProfile = profile
+    }
+
+    func profilesForManagement() async throws -> [LoginProfile] {
+        let lease = try await acquireProfileClient()
+        defer { releaseProfileClient(lease) }
+        let profiles = try await lease.client.listProfiles()
+        if let profile = try? await lease.client.currentProfile() {
+            updateProfileFromManagementBackend(profile)
+        }
+        return profiles
+    }
+
+    func switchProfileForManagement(id: String) async throws -> [LoginProfile] {
+        let lease = try await acquireProfileClient()
+        defer { releaseProfileClient(lease) }
+
+        try await lease.client.switchProfile(id: id)
+        updateProfileFromManagementBackend(try await lease.client.currentProfile())
+        return try await lease.client.listProfiles()
+    }
+
+    func deleteProfileForManagement(id: String) async throws -> [LoginProfile] {
+        let lease = try await acquireProfileClient()
+        defer { releaseProfileClient(lease) }
+
+        try await lease.client.deleteProfile(id: id)
+        return try await lease.client.listProfiles()
+    }
+
+    func addProfileForManagement(authKey: String, controlURL: String) async throws {
+        let lease = try await acquireProfileClient()
+        defer { releaseProfileClient(lease) }
+
+        let previousProfileID = currentProfile?.ID
+        var createdProfileID: String?
+        do {
+            try await lease.client.newProfile()
+            if let createdProfile = try? await lease.client.currentProfile() {
+                createdProfileID = createdProfile.ID
+            }
+            try await lease.client.patchPrefs(.setControlURL(controlURL))
+            try await lease.client.login(authKey: authKey)
+            updateProfileFromManagementBackend(try await lease.client.currentProfile())
+        } catch {
+            if let previousProfileID {
+                try? await lease.client.switchProfile(id: previousProfileID)
+                if let previousProfile = try? await lease.client.currentProfile() {
+                    updateProfileFromManagementBackend(previousProfile)
+                }
+            }
+            if let createdProfileID, createdProfileID != previousProfileID {
+                try? await lease.client.deleteProfile(id: createdProfileID)
+            }
+            throw error
         }
     }
 
@@ -2234,7 +2634,7 @@ class AppState: ObservableObject {
 
     /// Set the exit node to use for routing traffic.
     func setExitNode(_ peer: PeerNode) {
-        guard !isUpdatingExitNode else { return }
+        guard !isBackendTransitionInProgress else { return }
 
         let previousPrefs = prefs
         let targetID = peer.id
@@ -2269,7 +2669,7 @@ class AppState: ObservableObject {
 
     /// Clear the current exit node (stop using any exit node).
     func clearExitNode() {
-        guard !isUpdatingExitNode else { return }
+        guard !isBackendTransitionInProgress else { return }
 
         let previousPrefs = prefs
         isUpdatingExitNode = true
@@ -2303,7 +2703,7 @@ class AppState: ObservableObject {
 
     /// Set allow LAN access when using exit node.
     func setExitNodeAllowLANAccess(_ allow: Bool) {
-        guard !isUpdatingExitNode else { return }
+        guard !isBackendTransitionInProgress else { return }
 
         let previousPrefs = prefs
         isUpdatingExitNode = true

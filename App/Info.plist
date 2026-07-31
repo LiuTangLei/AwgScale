@@ -23,6 +23,8 @@
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan Tailnet Lock QR codes to sign devices.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

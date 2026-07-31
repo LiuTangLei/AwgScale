@@ -101,7 +101,6 @@ targets:
     platform: iOS
     sources:
       - path: Tests
-      - path: Shared
     dependencies:
       - target: AwgScale
     settings:

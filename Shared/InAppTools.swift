@@ -84,6 +84,14 @@ struct InAppSSHResponse: Decodable {
     }
 }
 
+/// Parses a user-entered TCP port and rejects values that cannot be represented
+/// by the networking stack.
+func validatedTCPPort(_ value: String) -> Int? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let port = Int(trimmed), (1...65_535).contains(port) else { return nil }
+    return port
+}
+
 struct TerminalScreenBuffer {
     private enum ParserState {
         case ground

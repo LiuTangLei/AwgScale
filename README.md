@@ -57,6 +57,10 @@ xcodebuild build -project AwgScale.xcodeproj -scheme AwgScale \
   CODE_SIGNING_ALLOWED=NO
 ```
 
+`build_go.sh` verifies that the framework resolves
+`github.com/LiuTangLei/tailscale v1.98.10` and
+`github.com/LiuTangLei/wireguard-go v0.0.21` before compiling.
+
 App-only UI can be developed in the Simulator. The system VPN tunnel requires a device with a valid Network Extension entitlement.
 
 ---

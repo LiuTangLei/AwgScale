@@ -158,33 +158,12 @@ private struct CustomServerLoginView: View {
     }
 
     private func submit() {
-        guard let normalizedURL = normalizedControlURL() else {
+        guard let normalizedURL = normalizedCustomControlServerURL(controlURL) else {
             validationError = "Enter a valid http or https URL."
             return
         }
 
         validationError = nil
         onContinue(normalizedURL)
-    }
-
-    private func normalizedControlURL() -> String? {
-        let trimmedURL = controlURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedURL.isEmpty else { return nil }
-
-        let urlWithScheme: String
-        if trimmedURL.contains("://") {
-            urlWithScheme = trimmedURL
-        } else {
-            urlWithScheme = "https://\(trimmedURL)"
-        }
-
-        guard let components = URLComponents(string: urlWithScheme),
-              let scheme = components.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              components.host?.isEmpty == false else {
-            return nil
-        }
-
-        return components.url?.absoluteString
     }
 }

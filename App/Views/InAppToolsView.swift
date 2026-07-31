@@ -148,6 +148,8 @@ struct TailnetBrowserView: View {
     @State private var addressSelectionToken = 0
     @State private var addressCursorEndToken = 0
     @State private var didLoadPersistedState = false
+    @State private var pageLoadTask: Task<Void, Never>?
+    @State private var pageLoadGeneration = 0
 
     private var activeTab: BrowserTab {
         guard tabs.indices.contains(activeTabIndex) else { return BrowserTab.blank() }
@@ -246,6 +248,10 @@ struct TailnetBrowserView: View {
                 didLoadPersistedState = true
                 loadPersistedBrowserState()
             }
+        }
+        .onDisappear {
+            cancelPendingPageLoad()
+            saveTabs()
         }
         .onChange(of: addressFieldFocused) { focused in
             guard !focused, activeTab.page != nil, isAddressEditing else { return }
@@ -481,10 +487,11 @@ struct TailnetBrowserView: View {
     private func captureActiveTabSnapshot() {
         guard tabs.indices.contains(activeTabIndex), activeTab.page != nil else { return }
         let index = activeTabIndex
+        let tabID = tabs[index].id
         webNavigation.takeSnapshot { image in
             guard let data = image?.jpegData(compressionQuality: 0.62) else { return }
             DispatchQueue.main.async {
-                guard tabs.indices.contains(index) else { return }
+                guard tabs.indices.contains(index), tabs[index].id == tabID else { return }
                 tabs[index].snapshotData = data
             }
         }
@@ -501,6 +508,7 @@ struct TailnetBrowserView: View {
         let target = sanitizedBrowserURL(rawURL ?? activeURL)
         guard !target.isEmpty, target != "http://", target != "https://" else { return }
 
+        cancelPendingPageLoad()
         webNavigation.reset()
         setBrowserChromeCollapsed(false, animated: false)
 
@@ -510,29 +518,39 @@ struct TailnetBrowserView: View {
         }
         isLoading = true
         let loadingIndex = activeTabIndex
+        let loadingTabID = tabs[loadingIndex].id
+        let generation = pageLoadGeneration
 
-        Task {
+        pageLoadTask = Task {
             do {
                 let proxy = try await appState.inAppBrowserProxy()
+                try Task.checkCancellation()
                 let loadedPage = InAppBrowserPage.liveProxy(url: target)
                 await MainActor.run {
-                    guard tabs.indices.contains(loadingIndex) else { return }
+                    guard pageLoadGeneration == generation,
+                          let currentIndex = tabs.firstIndex(where: { $0.id == loadingTabID }) else {
+                        return
+                    }
                     browserProxy = proxy
-                    tabs[loadingIndex].page = loadedPage
-                    tabs[loadingIndex].url = loadedPage.url
-                    tabs[loadingIndex].title = BrowserTab.title(for: loadedPage.url)
-                    tabs[loadingIndex].errorMessage = nil
+                    tabs[currentIndex].page = loadedPage
+                    tabs[currentIndex].url = loadedPage.url
+                    tabs[currentIndex].title = BrowserTab.title(for: loadedPage.url)
+                    tabs[currentIndex].errorMessage = nil
                     address = loadedPage.url
-                    addHistory(url: loadedPage.url, title: tabs[loadingIndex].title)
+                    addHistory(url: loadedPage.url, title: tabs[currentIndex].title)
                     saveTabs()
                     isLoading = false
+                    pageLoadTask = nil
                 }
             } catch {
                 await MainActor.run {
-                    if tabs.indices.contains(loadingIndex) {
-                        tabs[loadingIndex].errorMessage = error.localizedDescription
+                    guard pageLoadGeneration == generation else { return }
+                    if !Task.isCancelled,
+                       let currentIndex = tabs.firstIndex(where: { $0.id == loadingTabID }) {
+                        tabs[currentIndex].errorMessage = error.localizedDescription
                     }
                     isLoading = false
+                    pageLoadTask = nil
                 }
             }
         }
@@ -540,6 +558,7 @@ struct TailnetBrowserView: View {
 
     private func selectTab(_ index: Int) {
         guard tabs.indices.contains(index) else { return }
+        cancelPendingPageLoad()
         activeTabIndex = index
         address = sanitizedBrowserURL(tabs[index].url)
         webNavigation.reset()
@@ -549,6 +568,7 @@ struct TailnetBrowserView: View {
     }
 
     private func addTab() {
+        cancelPendingPageLoad()
         tabs.append(BrowserTab.blank())
         activeTabIndex = tabs.count - 1
         address = ""
@@ -561,12 +581,21 @@ struct TailnetBrowserView: View {
 
     private func closeTab(_ index: Int) {
         guard tabs.count > 1, tabs.indices.contains(index) else { return }
+        let activeTabID = activeTab.id
+        let closingActiveTab = tabs[index].id == activeTabID
+        if closingActiveTab {
+            cancelPendingPageLoad()
+        }
         tabs.remove(at: index)
-        activeTabIndex = min(activeTabIndex, tabs.count - 1)
-        webNavigation.reset()
-        isAddressEditing = false
-        addressFieldFocused = false
-        setBrowserChromeCollapsed(false, animated: false)
+        if let retainedIndex = tabs.firstIndex(where: { $0.id == activeTabID }) {
+            activeTabIndex = retainedIndex
+        } else {
+            activeTabIndex = min(index, tabs.count - 1)
+            webNavigation.reset()
+            isAddressEditing = false
+            addressFieldFocused = false
+            setBrowserChromeCollapsed(false, animated: false)
+        }
         saveTabs()
         if tabs.indices.contains(activeTabIndex) {
             address = sanitizedBrowserURL(tabs[activeTabIndex].url)
@@ -585,6 +614,13 @@ struct TailnetBrowserView: View {
         }
         address = url
         loadPage(from: url)
+    }
+
+    private func cancelPendingPageLoad() {
+        pageLoadGeneration &+= 1
+        pageLoadTask?.cancel()
+        pageLoadTask = nil
+        isLoading = false
     }
 
     private func goBackOrDismiss() {
@@ -1820,7 +1856,10 @@ struct TailnetTerminalView: View {
     @State private var isConnecting = false
     @State private var isSending = false
     @State private var errorMessage: String?
+    @State private var connectionTask: Task<Void, Never>?
+    @State private var sendTask: Task<Void, Never>?
     @State private var pollTask: Task<Void, Never>?
+    @State private var sessionGeneration = 0
     @State private var consecutivePollFailures = 0
     @State private var didHandleInitialHost = false
 
@@ -2234,7 +2273,7 @@ struct TailnetTerminalView: View {
             && !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && hasAuth
-            && Int(port) != nil
+            && validatedTCPPort(port) != nil
             && !isConnecting
     }
 
@@ -2247,7 +2286,7 @@ struct TailnetTerminalView: View {
     }
 
     private func connect() {
-        guard canConnect, let portNumber = Int(port) else { return }
+        guard canConnect, let portNumber = validatedTCPPort(port) else { return }
         let targetHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let targetUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let targetPassword = authMode == .password ? password : ""
@@ -2268,7 +2307,10 @@ struct TailnetTerminalView: View {
         lines = []
         lines.append(TerminalLine(kind: .notice, text: "Connecting to \(targetUser)@\(targetHost):\(portNumber)"))
 
-        Task {
+        connectionTask?.cancel()
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        connectionTask = Task {
             do {
                 let response = try await appState.openInAppSSHSession(
                     host: targetHost,
@@ -2278,11 +2320,16 @@ struct TailnetTerminalView: View {
                     privateKey: targetPrivateKey,
                     passphrase: targetPassphrase
                 )
-                await MainActor.run {
+                guard !Task.isCancelled, sessionGeneration == generation else {
+                    await appState.closeInAppSSHSession(sessionID: response.sessionID)
+                    return
+                }
+                let shouldCloseInactiveSession = await MainActor.run { () -> Bool in
+                    guard sessionGeneration == generation else { return true }
                     password = ""
                     privateKey = ""
                     passphrase = ""
-                    sessionID = response.sessionID
+                    sessionID = response.active ? response.sessionID : nil
                     isConnected = response.active
                     isConnecting = false
                     terminalKeyboardMode = .system
@@ -2291,17 +2338,24 @@ struct TailnetTerminalView: View {
                         showingConnectionEditor = false
                         lines.append(TerminalLine(kind: .notice, text: "Connected"))
                         appendSSHResponse(response)
-                        startPolling(sessionID: response.sessionID)
+                        startPolling(sessionID: response.sessionID, generation: generation)
                     } else {
                         appendSSHResponse(response)
                         lines.append(TerminalLine(kind: .error, text: "SSH session closed immediately"))
                     }
+                    connectionTask = nil
+                    return !response.active
+                }
+                if shouldCloseInactiveSession {
+                    await appState.closeInAppSSHSession(sessionID: response.sessionID)
                 }
             } catch {
                 await MainActor.run {
+                    guard sessionGeneration == generation, !Task.isCancelled else { return }
                     errorMessage = error.localizedDescription
                     lines.append(TerminalLine(kind: .error, text: error.localizedDescription))
                     isConnecting = false
+                    connectionTask = nil
                 }
             }
         }
@@ -2327,51 +2381,68 @@ struct TailnetTerminalView: View {
         let inputPayload = queuedSSHInput
         queuedSSHInput = ""
 
-        Task {
+        let generation = sessionGeneration
+        sendTask = Task {
             do {
                 let response = try await appState.sendInAppSSHInput(sessionID: currentSessionID, input: inputPayload)
                 await MainActor.run {
+                    guard sessionGeneration == generation,
+                          sessionID == currentSessionID,
+                          !Task.isCancelled else { return }
                     appendSSHResponse(response)
                     if !response.active {
                         markDisconnected()
+                        return
                     }
                     isSending = false
+                    sendTask = nil
                     flushQueuedSSHInput()
                 }
             } catch {
                 await MainActor.run {
+                    guard sessionGeneration == generation,
+                          sessionID == currentSessionID,
+                          !Task.isCancelled else { return }
                     errorMessage = error.localizedDescription
                     lines.append(TerminalLine(kind: .error, text: error.localizedDescription))
                     isSending = false
+                    sendTask = nil
                     flushQueuedSSHInput()
                 }
             }
         }
     }
 
-    private func startPolling(sessionID: String) {
+    private func startPolling(sessionID: String, generation: Int) {
         pollTask?.cancel()
         consecutivePollFailures = 0
         pollTask = Task {
             while !Task.isCancelled {
                 do {
                     let response = try await appState.readInAppSSHSession(sessionID: sessionID)
-                    await MainActor.run {
+                    guard !Task.isCancelled else { break }
+                    let shouldContinue = await MainActor.run { () -> Bool in
+                        guard sessionGeneration == generation,
+                              self.sessionID == sessionID else { return false }
                         consecutivePollFailures = 0
                         appendSSHResponse(response)
                         if !response.active {
                             markDisconnected()
+                            return false
                         }
+                        return true
                     }
-                    if !response.active { break }
+                    if !shouldContinue { break }
                 } catch {
                     if Task.isCancelled { break }
                     let shouldDisconnect = await MainActor.run { () -> Bool in
+                        guard sessionGeneration == generation,
+                              self.sessionID == sessionID else { return true }
                         consecutivePollFailures += 1
                         errorMessage = error.localizedDescription
                         if consecutivePollFailures >= 3 {
                             lines.append(TerminalLine(kind: .error, text: error.localizedDescription))
-                            markDisconnected()
+                            disconnect()
                             return true
                         }
                         return false
@@ -2405,6 +2476,11 @@ struct TailnetTerminalView: View {
     }
 
     private func disconnect(appendNotice: Bool = true) {
+        sessionGeneration &+= 1
+        connectionTask?.cancel()
+        connectionTask = nil
+        sendTask?.cancel()
+        sendTask = nil
         pollTask?.cancel()
         pollTask = nil
         let closingSessionID = sessionID
@@ -2425,8 +2501,14 @@ struct TailnetTerminalView: View {
     }
 
     private func markDisconnected() {
+        sessionGeneration &+= 1
+        connectionTask?.cancel()
+        connectionTask = nil
+        sendTask?.cancel()
+        sendTask = nil
         pollTask?.cancel()
         pollTask = nil
+        let closingSessionID = sessionID
         sessionID = nil
         isConnected = false
         isConnecting = false
@@ -2434,6 +2516,11 @@ struct TailnetTerminalView: View {
         queuedSSHInput = ""
         consecutivePollFailures = 0
         lines.append(TerminalLine(kind: .notice, text: "Disconnected"))
+        if let closingSessionID {
+            Task {
+                await appState.closeInAppSSHSession(sessionID: closingSessionID)
+            }
+        }
     }
 
     private func loadBookmarks() {
@@ -2515,6 +2602,8 @@ struct TailnetTerminalView: View {
             switch authMode {
             case .password:
                 try InAppCredentialStore.save(password, account: bookmark.account(for: .password))
+                InAppCredentialStore.delete(account: bookmark.account(for: .privateKey))
+                InAppCredentialStore.delete(account: bookmark.account(for: .passphrase))
                 bookmark.hasSavedPassword = true
             case .privateKey:
                 try InAppCredentialStore.save(privateKey, account: bookmark.account(for: .privateKey))
@@ -2525,6 +2614,7 @@ struct TailnetTerminalView: View {
                 } else {
                     InAppCredentialStore.delete(account: bookmark.account(for: .passphrase))
                 }
+                InAppCredentialStore.delete(account: bookmark.account(for: .password))
             }
         } else {
             InAppCredentialStore.deleteAll(for: bookmark)

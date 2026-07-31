@@ -16,6 +16,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+# Release builds must use the versioned forks in go.mod, never an ambient
+# parent workspace that happens to contain unreleased protocol changes.
+export GOWORK=off
 
 OUTPUT="Libtailscale.xcframework"
 
@@ -40,6 +43,27 @@ case "${1:-}" in
         exit 1
         ;;
 esac
+
+# Refuse to produce an AwgScale framework from upstream Tailscale or a
+# different WireGuard module by accident. These are the released AWG v2 forks
+# selected by this app's go.mod.
+TAILSCALE_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' tailscale.com)"
+TAILSCALE_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' tailscale.com)"
+WIREGUARD_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' github.com/LiuTangLei/wireguard-go)"
+WIREGUARD_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/LiuTangLei/wireguard-go)"
+
+if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
+      "$TAILSCALE_VERSION" != "v1.98.10" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.98.10, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+    exit 1
+fi
+if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||
+      "$WIREGUARD_VERSION" != "v0.0.21" ]]; then
+    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.21, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
+    exit 1
+fi
+echo "Using $TAILSCALE_SOURCE $TAILSCALE_VERSION"
+echo "Using $WIREGUARD_SOURCE $WIREGUARD_VERSION"
 
 MOBILE_VERSION="$(go list -m -f '{{.Version}}' golang.org/x/mobile)"
 GOBIN_DIR="$(go env GOBIN)"

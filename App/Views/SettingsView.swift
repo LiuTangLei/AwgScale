@@ -80,16 +80,20 @@ struct SettingsView: View {
             }
 
             Section("Files") {
-                NavigationLink(destination: TaildropView()) {
-                    HStack {
-                        SettingsRowLabel(title: "Taildrop", systemImage: "arrow.up.arrow.down.circle")
-                        Spacer()
-                        if appState.taildropFilesWaiting {
-                            Text("Files waiting")
-                                .font(.caption)
-                                .foregroundColor(.accentColor)
+                if appState.usesVPNPermission {
+                    NavigationLink(destination: TaildropView()) {
+                        HStack {
+                            SettingsRowLabel(title: "Taildrop", systemImage: "arrow.up.arrow.down.circle")
+                            Spacer()
+                            if appState.taildropFilesWaiting {
+                                Text("Files waiting")
+                                    .font(.caption)
+                                    .foregroundColor(.accentColor)
+                            }
                         }
                     }
+                } else {
+                    DisabledSettingsRow(title: "Taildrop", systemImage: "arrow.up.arrow.down.circle")
                 }
             }
 
@@ -123,8 +127,12 @@ struct SettingsView: View {
             }
 
             Section("Security") {
-                NavigationLink(destination: TailnetLockView()) {
-                    SettingsRowLabel(title: "Tailnet Lock", systemImage: "lock.shield")
+                if appState.usesVPNPermission {
+                    NavigationLink(destination: TailnetLockView()) {
+                        SettingsRowLabel(title: "Tailnet Lock", systemImage: "lock.shield")
+                    }
+                } else {
+                    DisabledSettingsRow(title: "Tailnet Lock", systemImage: "lock.shield")
                 }
                 
                 NavigationLink(destination: MDMInfoView()) {
@@ -133,8 +141,12 @@ struct SettingsView: View {
             }
 
             Section("Diagnostics") {
-                NavigationLink(destination: BugReportView()) {
-                    SettingsRowLabel(title: "Bug Report", systemImage: "ladybug")
+                if appState.usesVPNPermission {
+                    NavigationLink(destination: BugReportView()) {
+                        SettingsRowLabel(title: "Bug Report", systemImage: "ladybug")
+                    }
+                } else {
+                    DisabledSettingsRow(title: "Bug Report", systemImage: "ladybug")
                 }
 
                 NavigationLink(destination: NotificationsSettingsView()) {
@@ -231,7 +243,7 @@ private struct DisabledSettingsRow: View {
         HStack {
             SettingsRowLabel(title: title, systemImage: systemImage, color: color)
             Spacer()
-            Text("VPN required")
+            Text("System VPN required")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

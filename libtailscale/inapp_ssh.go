@@ -58,10 +58,11 @@ type inAppSSHSession struct {
 	done        chan struct{}
 	outputReady chan struct{}
 
-	mu        sync.Mutex
-	buffer    []byte
-	truncated bool
-	closed    bool
+	mu              sync.Mutex
+	buffer          []byte
+	truncated       bool
+	closed          bool
+	resourcesClosed bool
 }
 
 func (a *App) handleInAppSSHOpen(w http.ResponseWriter, r *http.Request, b *backend) {
@@ -196,7 +197,7 @@ func (a *App) handleInAppSSHOpen(w http.ResponseWriter, r *http.Request, b *back
 		session.markClosed()
 	}()
 
-	writeSSHResponse(w, http.StatusOK, id, session)
+	a.writeSSHResponse(w, http.StatusOK, id, session)
 }
 
 func (a *App) handleInAppSSHSend(w http.ResponseWriter, r *http.Request) {
@@ -222,7 +223,7 @@ func (a *App) handleInAppSSHSend(w http.ResponseWriter, r *http.Request) {
 	if req.WaitMillis > 0 {
 		session.waitForOutput(r.Context(), time.Duration(req.WaitMillis)*time.Millisecond)
 	}
-	writeSSHResponse(w, http.StatusOK, req.SessionID, session)
+	a.writeSSHResponse(w, http.StatusOK, req.SessionID, session)
 }
 
 func (a *App) handleInAppSSHRead(w http.ResponseWriter, r *http.Request) {
@@ -244,7 +245,7 @@ func (a *App) handleInAppSSHRead(w http.ResponseWriter, r *http.Request) {
 	if req.WaitMillis > 0 {
 		session.waitForOutput(r.Context(), time.Duration(req.WaitMillis)*time.Millisecond)
 	}
-	writeSSHResponse(w, http.StatusOK, req.SessionID, session)
+	a.writeSSHResponse(w, http.StatusOK, req.SessionID, session)
 }
 
 func (a *App) handleInAppSSHClose(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +306,20 @@ func (a *App) removeInAppSSHSession(id string) (*inAppSSHSession, bool) {
 		delete(a.sshSessions, id)
 	}
 	return session, ok
+}
+
+func (a *App) removeMatchingInAppSSHSession(
+	id string,
+	expected *inAppSSHSession,
+) (*inAppSSHSession, bool) {
+	a.sshMu.Lock()
+	defer a.sshMu.Unlock()
+	session, ok := a.sshSessions[id]
+	if !ok || session != expected {
+		return nil, false
+	}
+	delete(a.sshSessions, id)
+	return session, true
 }
 
 func (a *App) closeInAppSSHSessions() {
@@ -405,27 +420,48 @@ func (s *inAppSSHSession) markClosed() {
 
 func (s *inAppSSHSession) close() {
 	s.mu.Lock()
-	if s.closed {
+	if s.resourcesClosed {
 		s.mu.Unlock()
 		return
 	}
+	shouldCloseDone := !s.closed
 	s.closed = true
+	s.resourcesClosed = true
 	s.mu.Unlock()
-	_ = s.stdin.Close()
-	_ = s.session.Close()
-	_ = s.client.Close()
-	close(s.done)
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+	}
+	if s.session != nil {
+		_ = s.session.Close()
+	}
+	if s.client != nil {
+		_ = s.client.Close()
+	}
+	if shouldCloseDone {
+		close(s.done)
+	}
 }
 
-func writeSSHResponse(w http.ResponseWriter, status int, id string, session *inAppSSHSession) {
+func (a *App) writeSSHResponse(
+	w http.ResponseWriter,
+	status int,
+	id string,
+	session *inAppSSHSession,
+) {
 	body, truncated := session.drainOutput()
+	active := session.active()
 	out := inAppSSHResponse{
 		SessionID: id,
-		Active:    session.active(),
+		Active:    active,
 		Truncated: truncated,
 	}
 	setTextOrBase64(body, &out.Body, &out.BodyBase64)
 	writeInAppJSON(w, status, out)
+	if !active {
+		if removed, ok := a.removeMatchingInAppSSHSession(id, session); ok {
+			removed.close()
+		}
+	}
 }
 
 func randomSessionID() (string, error) {

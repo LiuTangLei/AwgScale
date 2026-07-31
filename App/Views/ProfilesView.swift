@@ -11,6 +11,7 @@ struct ProfilesView: View {
     @State private var showingSwitchConfirmation: Bool = false
     @State private var profileToSwitch: LoginProfile?
     @State private var isSwitching: Bool = false
+    @State private var profileLoadGeneration: Int = 0
     
     var body: some View {
         List {
@@ -92,7 +93,7 @@ struct ProfilesView: View {
                     }
                     
                     Label {
-                        Text("Switching profiles will disconnect and reconnect the VPN.")
+                        Text("Switching profiles restarts the active tailnet session.")
                             .font(.caption)
                             .foregroundColor(.orange)
                     } icon: {
@@ -108,10 +109,8 @@ struct ProfilesView: View {
         .refreshable {
             await loadProfiles()
         }
-        .onAppear {
-            Task {
-                await loadProfiles()
-            }
+        .task {
+            await loadProfiles()
         }
         .sheet(isPresented: $showingAddProfile) {
             NavigationView {
@@ -130,7 +129,7 @@ struct ProfilesView: View {
             }
         } message: {
             if let profile = profileToSwitch {
-                Text("Switch to \(profile.name)? This will disconnect the current VPN session.")
+                Text("Switch to \(profile.name)? The current tailnet session will reconnect.")
             }
         }
         .overlay {
@@ -154,19 +153,18 @@ struct ProfilesView: View {
     
     @MainActor
     private func loadProfiles() async {
-        guard let vpn = appState.vpnManager else {
-            error = "VPN manager not available"
-            isLoading = false
-            return
-        }
-        
+        profileLoadGeneration &+= 1
+        let generation = profileLoadGeneration
         isLoading = true
         error = nil
         
         do {
-            profiles = try await LocalAPIClient.vpn(vpn).listProfiles()
+            let loadedProfiles = try await appState.profilesForManagement()
+            guard profileLoadGeneration == generation, !Task.isCancelled else { return }
+            profiles = loadedProfiles
             isLoading = false
         } catch {
+            guard profileLoadGeneration == generation, !Task.isCancelled else { return }
             self.error = "Failed to load profiles: \(error.localizedDescription)"
             isLoading = false
         }
@@ -174,26 +172,16 @@ struct ProfilesView: View {
     
     private func switchToProfile(_ profile: LoginProfile) {
         guard !isSwitching else { return }  // Prevent race condition
-        guard let vpn = appState.vpnManager else { return }
         
         isSwitching = true
         
         Task {
             do {
-                // First disconnect
-                vpn.disconnect()
-                try await Task.sleep(nanoseconds: 500_000_000)
-                
-                // Switch profile
-                try await LocalAPIClient.vpn(vpn).switchProfile(id: profile.ID)
-                
-                // Wait and reconnect
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                vpn.connect()
-                
+                let updatedProfiles = try await appState.switchProfileForManagement(id: profile.ID)
+
                 await MainActor.run {
+                    profiles = updatedProfiles
                     isSwitching = false
-                    appState.fetchCurrentProfile()
                 }
             } catch {
                 await MainActor.run {
@@ -205,12 +193,12 @@ struct ProfilesView: View {
     }
     
     private func deleteProfile(_ profile: LoginProfile) {
-        guard let vpn = appState.vpnManager else { return }
-        
         Task {
             do {
-                try await LocalAPIClient.vpn(vpn).deleteProfile(id: profile.ID)
-                await loadProfiles()
+                let updatedProfiles = try await appState.deleteProfileForManagement(id: profile.ID)
+                await MainActor.run {
+                    profiles = updatedProfiles
+                }
             } catch {
                 await MainActor.run {
                     appState.lastError = "Failed to delete profile: \(error.localizedDescription)"
@@ -346,32 +334,38 @@ struct AddProfileView: View {
                 Button("Cancel") {
                     onComplete()
                 }
+                .disabled(isAdding)
             }
         }
+        .interactiveDismissDisabled(isAdding)
     }
     
     private func addProfile() {
-        guard let vpn = appState.vpnManager else {
-            error = "VPN manager not available"
+        let trimmedAuthKey = authKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAuthKey.isEmpty else {
+            error = "Enter an auth key."
             return
         }
-        
+        let selectedControlURL: String
+        if useCustomServer {
+            guard let normalizedURL = normalizedCustomControlServerURL(controlURL) else {
+                error = "Enter a valid http or https control server URL."
+                return
+            }
+            selectedControlURL = normalizedURL
+        } else {
+            selectedControlURL = officialControlServerURL
+        }
+
         isAdding = true
         error = nil
         
         Task {
             do {
-                let api = LocalAPIClient.vpn(vpn)
-                // Create new profile
-                try await api.newProfile()
-
-                // Set control URL if custom
-                if useCustomServer && !controlURL.isEmpty {
-                    try await api.patchPrefs(.setControlURL(controlURL))
-                }
-
-                // Login with auth key
-                try await api.login(authKey: authKey)
+                try await appState.addProfileForManagement(
+                    authKey: trimmedAuthKey,
+                    controlURL: selectedControlURL
+                )
                 
                 await MainActor.run {
                     isAdding = false

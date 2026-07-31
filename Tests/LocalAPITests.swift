@@ -59,6 +59,43 @@ final class LocalAPITests: XCTestCase {
             "/localapi/v0/profiles/profile%23two",
         ])
     }
+
+    func testProfileCreationAndAuthKeyUseOfficialLocalAPIContracts() async throws {
+        var requests: [(method: String, endpoint: String, body: Data?)] = []
+        let client = LocalAPIClient { method, endpoint, body, _, _ in
+            requests.append((method, endpoint, body))
+            return IPCResponse.success(statusCode: 204)
+        }
+
+        try await client.newProfile()
+        try await client.login(authKey: "tskey-auth-test")
+
+        XCTAssertEqual(requests.map(\.method), ["PUT", "POST"])
+        XCTAssertEqual(requests.map(\.endpoint), [
+            "/localapi/v0/profiles/",
+            "/localapi/v0/start",
+        ])
+        let startBody = try XCTUnwrap(requests.last?.body)
+        let startOptions = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: startBody) as? [String: String]
+        )
+        XCTAssertEqual(startOptions, ["AuthKey": "tskey-auth-test"])
+    }
+
+    func testBugReportUsesRequiredPOSTMethod() async throws {
+        var capturedMethod = ""
+        var capturedEndpoint = ""
+        let client = LocalAPIClient { method, endpoint, _, _, _ in
+            capturedMethod = method
+            capturedEndpoint = endpoint
+            return IPCResponse.success(statusCode: 200, body: Data("BUG-test".utf8))
+        }
+
+        let marker = try await client.bugReportLogs()
+        XCTAssertEqual(marker, "BUG-test")
+        XCTAssertEqual(capturedMethod, "POST")
+        XCTAssertEqual(capturedEndpoint, "/localapi/v0/bugreport")
+    }
 }
 
 final class TaildropFileSafetyTests: XCTestCase {
@@ -72,9 +109,45 @@ final class TaildropFileSafetyTests: XCTestCase {
         XCTAssertFalse(TaildropFile.isSafeLocalName("folder/file.txt"))
         XCTAssertFalse(TaildropFile.isSafeLocalName("folder\\file.txt"))
     }
+
+    func testSharedInputNamesAreReducedToSafeBasenames() {
+        XCTAssertEqual(
+            safeSharedFileName(suggestedName: "../private/report.txt", fallbackName: "fallback"),
+            "report.txt"
+        )
+        XCTAssertEqual(
+            safeSharedFileName(suggestedName: "..", fallbackName: "fallback.txt"),
+            "fallback.txt"
+        )
+        XCTAssertEqual(
+            safeSharedFileName(suggestedName: ".", fallbackName: ".."),
+            "file"
+        )
+        XCTAssertEqual(
+            safeSharedFileName(suggestedName: "folder\\secret.txt", fallbackName: "fallback"),
+            "folder-secret.txt"
+        )
+        XCTAssertEqual(
+            safeSharedFileName(suggestedName: "/", fallbackName: "fallback.txt"),
+            "fallback.txt"
+        )
+        XCTAssertEqual(
+            safeSharedFileName(suggestedName: "\u{0}", fallbackName: "fallback.txt"),
+            "fallback.txt"
+        )
+    }
 }
 
 final class TerminalScreenBufferTests: XCTestCase {
+    func testValidatedTCPPortRejectsOutOfRangeValues() {
+        XCTAssertEqual(validatedTCPPort("22"), 22)
+        XCTAssertEqual(validatedTCPPort(" 443 "), 443)
+        XCTAssertNil(validatedTCPPort("0"))
+        XCTAssertNil(validatedTCPPort("-1"))
+        XCTAssertNil(validatedTCPPort("65536"))
+        XCTAssertNil(validatedTCPPort("ssh"))
+    }
+
     func testConsumesBracketedPasteModeSequences() {
         var terminal = TerminalScreenBuffer()
 

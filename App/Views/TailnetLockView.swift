@@ -1,4 +1,57 @@
+import AVFoundation
 import SwiftUI
+
+enum TailnetLockSigningURLValidationError: LocalizedError, Equatable {
+    case empty
+    case unsupportedURL
+    case missingParameter(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .empty:
+            return "The QR code is empty."
+        case .unsupportedURL:
+            return "This is not a supported Tailnet Lock signing QR code."
+        case .missingParameter(let name):
+            return "The Tailnet Lock signing URL is missing \(name)."
+        }
+    }
+}
+
+/// Performs structural validation only. LocalAPI remains authoritative for the
+/// Tailnet Lock HMAC and signing-key validation.
+func validatedTailnetLockSigningURL(from payload: String) throws -> String {
+    let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+        throw TailnetLockSigningURLValidationError.empty
+    }
+
+    guard var components = URLComponents(string: trimmed),
+          components.scheme?.lowercased() == "tailscale",
+          components.host?.lowercased() == "sign-device",
+          components.port == nil,
+          components.user == nil,
+          components.password == nil,
+          components.percentEncodedPath == "/v1/",
+          components.fragment == nil else {
+        throw TailnetLockSigningURLValidationError.unsupportedURL
+    }
+
+    let values = Dictionary(
+        grouping: components.queryItems ?? [],
+        by: \.name
+    ).mapValues { items in
+        items.first?.value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+    for parameter in ["nk", "tp", "dn", "os", "em", "hm"] where values[parameter]?.isEmpty != false {
+        throw TailnetLockSigningURLValidationError.missingParameter(parameter)
+    }
+
+    // Go normalizes the scheme but compares the command host literally.
+    components.scheme = "tailscale"
+    components.host = "sign-device"
+    return components.string ?? trimmed
+}
 
 /// Tailnet Lock management view.
 /// Shows lock status and allows signing operations.
@@ -190,6 +243,12 @@ struct TailnetLockView: View {
                 })
             }
         }
+        .sheet(isPresented: $showingQRScanner) {
+            TailnetLockQRScannerSheet { url in
+                showingQRScanner = false
+                signNode(url: url)
+            }
+        }
         .overlay {
             if isSigning {
                 ZStack {
@@ -264,6 +323,262 @@ struct TailnetLockView: View {
             return String(key.prefix(12)) + "..." + String(key.suffix(8))
         }
         return key
+    }
+}
+
+private enum TailnetLockQRScannerError: LocalizedError, Equatable {
+    case permissionDenied
+    case cameraUnavailable
+    case configurationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .permissionDenied:
+            return "Camera access is disabled. Allow camera access in Settings to scan a Tailnet Lock QR code."
+        case .cameraUnavailable:
+            return "A camera is not available on this device."
+        case .configurationFailed:
+            return "The camera could not be configured for QR code scanning."
+        }
+    }
+}
+
+private struct TailnetLockQRScannerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var scannerID = UUID()
+    @State private var scannerError: Error?
+
+    let onSign: (String) -> Void
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if let scannerError {
+                    VStack(spacing: 16) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                            .foregroundColor(.orange)
+                        Text(scannerError.localizedDescription)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+
+                        if (scannerError as? TailnetLockQRScannerError) == .permissionDenied {
+                            Button("Open Settings") {
+                                guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else {
+                                    return
+                                }
+                                UIApplication.shared.open(settingsURL)
+                            }
+                        }
+
+                        Button("Try Again") {
+                            self.scannerError = nil
+                            scannerID = UUID()
+                        }
+                    }
+                } else {
+                    ZStack(alignment: .bottom) {
+                        TailnetLockQRScannerView { result in
+                            handle(result)
+                        }
+                        .id(scannerID)
+                        .ignoresSafeArea(edges: .bottom)
+
+                        Text("Align the Tailnet Lock QR code within the camera view.")
+                            .font(.footnote)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding()
+                            .background(.black.opacity(0.65))
+                            .cornerRadius(10)
+                            .padding()
+                    }
+                }
+            }
+            .navigationTitle("Scan to Sign")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func handle(_ result: Result<String, Error>) {
+        switch result {
+        case .success(let payload):
+            do {
+                let url = try validatedTailnetLockSigningURL(from: payload)
+                onSign(url)
+            } catch {
+                scannerError = error
+            }
+        case .failure(let error):
+            scannerError = error
+        }
+    }
+}
+
+private struct TailnetLockQRScannerView: UIViewControllerRepresentable {
+    let completion: (Result<String, Error>) -> Void
+
+    func makeUIViewController(context: Context) -> TailnetLockQRScannerViewController {
+        TailnetLockQRScannerViewController(completion: completion)
+    }
+
+    func updateUIViewController(
+        _ uiViewController: TailnetLockQRScannerViewController,
+        context: Context
+    ) {}
+}
+
+private final class TailnetLockQRScannerViewController: UIViewController,
+    AVCaptureMetadataOutputObjectsDelegate
+{
+    private let captureSession = AVCaptureSession()
+    private let sessionQueue = DispatchQueue(label: "top.yesican.awgscale.qr-scanner")
+    private let completion: (Result<String, Error>) -> Void
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var isVisible = false
+    private var isConfigured = false
+    private var didComplete = false
+
+    init(completion: @escaping (Result<String, Error>) -> Void) {
+        self.completion = completion
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+
+        let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
+        previewLayer.videoGravity = .resizeAspectFill
+        view.layer.addSublayer(previewLayer)
+        self.previewLayer = previewLayer
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            isVisible = true
+            authorizeAndStart()
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            isVisible = false
+            if captureSession.isRunning {
+                captureSession.stopRunning()
+            }
+        }
+    }
+
+    private func authorizeAndStart() {
+        guard isVisible, !didComplete else { return }
+
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureAndStart()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                self?.sessionQueue.async {
+                    guard let self, self.isVisible, !self.didComplete else { return }
+                    if granted {
+                        self.configureAndStart()
+                    } else {
+                        self.finish(.failure(TailnetLockQRScannerError.permissionDenied))
+                    }
+                }
+            }
+        case .denied, .restricted:
+            finish(.failure(TailnetLockQRScannerError.permissionDenied))
+        @unknown default:
+            finish(.failure(TailnetLockQRScannerError.permissionDenied))
+        }
+    }
+
+    private func configureAndStart() {
+        guard isVisible, !didComplete else { return }
+
+        if !isConfigured {
+            guard let camera = AVCaptureDevice.default(for: .video) else {
+                finish(.failure(TailnetLockQRScannerError.cameraUnavailable))
+                return
+            }
+
+            do {
+                let input = try AVCaptureDeviceInput(device: camera)
+                let output = AVCaptureMetadataOutput()
+
+                captureSession.beginConfiguration()
+                defer { captureSession.commitConfiguration() }
+
+                guard captureSession.canAddInput(input),
+                      captureSession.canAddOutput(output) else {
+                    finish(.failure(TailnetLockQRScannerError.configurationFailed))
+                    return
+                }
+
+                captureSession.addInput(input)
+                captureSession.addOutput(output)
+                output.setMetadataObjectsDelegate(self, queue: sessionQueue)
+                guard output.availableMetadataObjectTypes.contains(.qr) else {
+                    finish(.failure(TailnetLockQRScannerError.configurationFailed))
+                    return
+                }
+                output.metadataObjectTypes = [.qr]
+                isConfigured = true
+            } catch {
+                finish(.failure(TailnetLockQRScannerError.configurationFailed))
+                return
+            }
+        }
+
+        guard isVisible, !captureSession.isRunning else { return }
+        captureSession.startRunning()
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard let qrCode = metadataObjects
+            .compactMap({ $0 as? AVMetadataMachineReadableCodeObject })
+            .first(where: { $0.type == .qr }),
+              let payload = qrCode.stringValue else {
+            return
+        }
+        finish(.success(payload))
+    }
+
+    private func finish(_ result: Result<String, Error>) {
+        guard !didComplete else { return }
+        didComplete = true
+        if captureSession.isRunning {
+            captureSession.stopRunning()
+        }
+        DispatchQueue.main.async { [completion] in
+            completion(result)
+        }
     }
 }
 
