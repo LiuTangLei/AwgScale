@@ -3,6 +3,7 @@ package libtailscale
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"testing"
 
@@ -228,6 +229,17 @@ func TestAppInjectAndCallbackBeforeBackend(t *testing.T) {
 	a.SetPacketCallback(cb)
 	if a.packetCallback != cb {
 		t.Fatalf("packetCallback not stored")
+	}
+}
+
+func TestBackendPeerForIPBeforeLocalBackendIsReady(t *testing.T) {
+	var b *backend
+	if _, ok := b.peerForIP(netip.MustParseAddr("100.64.0.1")); ok {
+		t.Fatal("nil backend unexpectedly resolved a peer")
+	}
+	b = &backend{}
+	if _, ok := b.peerForIP(netip.MustParseAddr("100.64.0.1")); ok {
+		t.Fatal("backend without LocalBackend unexpectedly resolved a peer")
 	}
 }
 

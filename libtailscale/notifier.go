@@ -31,6 +31,20 @@ func (app *App) WatchNotifications(mask int, cb NotificationCallback) Notificati
 			}
 		}()
 
+		// Tailscale 1.102 keeps peers in LocalBackend's live node map. Even on
+		// Apple platforms, where the legacy Notify.NetMap is still emitted, its
+		// embedded Peers slice can therefore be stale or empty. AwgScale's app and
+		// Network Extension IPC contract intentionally shares one complete
+		// NetworkMap snapshot, so replace both legacy NetMap notifications and
+		// peer deltas with the authoritative live view.
+		if notifyNeedsCompleteNetMapSnapshot(notify) {
+			if nm := backend.NetMapWithPeers(); nm != nil {
+				copy := *notify
+				copy.NetMap = nm
+				notify = &copy
+			}
+		}
+
 		if notify.NetMap != nil {
 			app.refreshUsableDERPMapForLocalAPI("netmap-notify")
 		}
@@ -47,6 +61,14 @@ func (app *App) WatchNotifications(mask int, cb NotificationCallback) Notificati
 		return true
 	})
 	return &notificationManager{cancel}
+}
+
+func notifyNeedsCompleteNetMapSnapshot(notify *ipn.Notify) bool {
+	return notify != nil && (notify.NetMap != nil ||
+		notify.SelfChange != nil ||
+		len(notify.PeersChanged) != 0 ||
+		len(notify.PeersRemoved) != 0 ||
+		len(notify.UserProfiles) != 0)
 }
 
 type notificationManager struct {

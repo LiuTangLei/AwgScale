@@ -240,7 +240,7 @@ struct UnhealthyState: Codable {
 
 // MARK: - Amnezia WireGuard (AWG)
 
-/// Maps to Go's AmneziaWGPrefs — AWG obfuscation parameters.
+/// Maps to Go's AmneziaWGPrefs — AWG v2/v3 obfuscation parameters.
 struct AmneziaWGPrefs: Codable {
     let JC: Int?    // Junk packet count
     let JMin: Int?  // Junk packet min size
@@ -259,12 +259,156 @@ struct AmneziaWGPrefs: Codable {
     let H3: MagicHeaderRange?
     let H4: MagicHeaderRange?
 
-    static let empty = AmneziaWGPrefs(
-        JC: nil, JMin: nil, JMax: nil,
-        S1: nil, S2: nil, S3: nil, S4: nil,
-        I1: nil, I2: nil, I3: nil, I4: nil, I5: nil,
-        H1: nil, H2: nil, H3: nil, H4: nil
-    )
+    // AWG v3 fields. Ranges use the same inclusive min/max wire format as H1-H4.
+    let HeaderProtectionKey: String?
+    let ContentPaddingAddition: MagicHeaderRange?
+    let RekeyAfterTime: MagicHeaderRange?
+    let RekeyTimeout: MagicHeaderRange?
+    let RejectAfterTime: MagicHeaderRange?
+    let KeepaliveTimeout: MagicHeaderRange?
+    let MaxHandshakeAttempts: MagicHeaderRange?
+
+    init(
+        JC: Int? = nil,
+        JMin: Int? = nil,
+        JMax: Int? = nil,
+        S1: Int? = nil,
+        S2: Int? = nil,
+        S3: Int? = nil,
+        S4: Int? = nil,
+        I1: String? = nil,
+        I2: String? = nil,
+        I3: String? = nil,
+        I4: String? = nil,
+        I5: String? = nil,
+        H1: MagicHeaderRange? = nil,
+        H2: MagicHeaderRange? = nil,
+        H3: MagicHeaderRange? = nil,
+        H4: MagicHeaderRange? = nil,
+        HeaderProtectionKey: String? = nil,
+        ContentPaddingAddition: MagicHeaderRange? = nil,
+        RekeyAfterTime: MagicHeaderRange? = nil,
+        RekeyTimeout: MagicHeaderRange? = nil,
+        RejectAfterTime: MagicHeaderRange? = nil,
+        KeepaliveTimeout: MagicHeaderRange? = nil,
+        MaxHandshakeAttempts: MagicHeaderRange? = nil
+    ) {
+        self.JC = JC
+        self.JMin = JMin
+        self.JMax = JMax
+        self.S1 = S1
+        self.S2 = S2
+        self.S3 = S3
+        self.S4 = S4
+        self.I1 = I1
+        self.I2 = I2
+        self.I3 = I3
+        self.I4 = I4
+        self.I5 = I5
+        self.H1 = H1
+        self.H2 = H2
+        self.H3 = H3
+        self.H4 = H4
+        self.HeaderProtectionKey = HeaderProtectionKey
+        self.ContentPaddingAddition = ContentPaddingAddition
+        self.RekeyAfterTime = RekeyAfterTime
+        self.RekeyTimeout = RekeyTimeout
+        self.RejectAfterTime = RejectAfterTime
+        self.KeepaliveTimeout = KeepaliveTimeout
+        self.MaxHandshakeAttempts = MaxHandshakeAttempts
+    }
+
+    static let empty = AmneziaWGPrefs()
+    private static let zeroHeaderProtectionKey = String(repeating: "0", count: 64)
+
+    /// Accepts the Go field names, lower-case historical names, and wireguard-go's
+    /// snake_case v3 names. Unknown fields are ignored only when at least one known
+    /// AWG field is present, preventing an unrelated JSON object from clearing AWG.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: FlexibleAWGCodingKey.self)
+        var recognizedField = false
+
+        func decode<T: Decodable>(_ type: T.Type, named name: String) throws -> T? {
+            let normalizedName = normalizedAWGJSONKey(name)
+            guard let key = container.allKeys.first(where: {
+                normalizedAWGJSONKey($0.stringValue) == normalizedName
+            }) else {
+                return nil
+            }
+            recognizedField = true
+            return try container.decodeIfPresent(type, forKey: key)
+        }
+
+        JC = try decode(Int.self, named: "JC")
+        JMin = try decode(Int.self, named: "JMin")
+        JMax = try decode(Int.self, named: "JMax")
+        S1 = try decode(Int.self, named: "S1")
+        S2 = try decode(Int.self, named: "S2")
+        S3 = try decode(Int.self, named: "S3")
+        S4 = try decode(Int.self, named: "S4")
+        I1 = try decode(String.self, named: "I1")
+        I2 = try decode(String.self, named: "I2")
+        I3 = try decode(String.self, named: "I3")
+        I4 = try decode(String.self, named: "I4")
+        I5 = try decode(String.self, named: "I5")
+        H1 = try decode(MagicHeaderRange.self, named: "H1")
+        H2 = try decode(MagicHeaderRange.self, named: "H2")
+        H3 = try decode(MagicHeaderRange.self, named: "H3")
+        H4 = try decode(MagicHeaderRange.self, named: "H4")
+        HeaderProtectionKey = try decode(String.self, named: "HeaderProtectionKey")
+        ContentPaddingAddition = try decode(MagicHeaderRange.self, named: "ContentPaddingAddition")
+        RekeyAfterTime = try decode(MagicHeaderRange.self, named: "RekeyAfterTime")
+        RekeyTimeout = try decode(MagicHeaderRange.self, named: "RekeyTimeout")
+        RejectAfterTime = try decode(MagicHeaderRange.self, named: "RejectAfterTime")
+        KeepaliveTimeout = try decode(MagicHeaderRange.self, named: "KeepaliveTimeout")
+        MaxHandshakeAttempts = try decode(MagicHeaderRange.self, named: "MaxHandshakeAttempts")
+
+        if !container.allKeys.isEmpty && !recognizedField {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "JSON contains no recognized AWG fields")
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CanonicalAWGCodingKey.self)
+        try container.encodeIfPresent(JC, forKey: .JC)
+        try container.encodeIfPresent(JMin, forKey: .JMin)
+        try container.encodeIfPresent(JMax, forKey: .JMax)
+        try container.encodeIfPresent(S1, forKey: .S1)
+        try container.encodeIfPresent(S2, forKey: .S2)
+        try container.encodeIfPresent(S3, forKey: .S3)
+        try container.encodeIfPresent(S4, forKey: .S4)
+        try container.encodeIfPresent(I1, forKey: .I1)
+        try container.encodeIfPresent(I2, forKey: .I2)
+        try container.encodeIfPresent(I3, forKey: .I3)
+        try container.encodeIfPresent(I4, forKey: .I4)
+        try container.encodeIfPresent(I5, forKey: .I5)
+        try container.encodeIfPresent(H1, forKey: .H1)
+        try container.encodeIfPresent(H2, forKey: .H2)
+        try container.encodeIfPresent(H3, forKey: .H3)
+        try container.encodeIfPresent(H4, forKey: .H4)
+        try container.encodeIfPresent(HeaderProtectionKey, forKey: .HeaderProtectionKey)
+        try container.encodeIfPresent(ContentPaddingAddition, forKey: .ContentPaddingAddition)
+        try container.encodeIfPresent(RekeyAfterTime, forKey: .RekeyAfterTime)
+        try container.encodeIfPresent(RekeyTimeout, forKey: .RekeyTimeout)
+        try container.encodeIfPresent(RejectAfterTime, forKey: .RejectAfterTime)
+        try container.encodeIfPresent(KeepaliveTimeout, forKey: .KeepaliveTimeout)
+        try container.encodeIfPresent(MaxHandshakeAttempts, forKey: .MaxHandshakeAttempts)
+    }
+
+    var isV3: Bool {
+        (HeaderProtectionKey?.isEmpty == false && HeaderProtectionKey != Self.zeroHeaderProtectionKey) ||
+        [
+            ContentPaddingAddition, RekeyAfterTime, RekeyTimeout,
+            RejectAfterTime, KeepaliveTimeout, MaxHandshakeAttempts,
+        ].contains { $0?.hasValue == true }
+    }
+
+    var profileVersion: String {
+        if isV3 { return "AWG v3" }
+        return hasNonDefaultValues ? "AWG v2" : "Standard WireGuard"
+    }
 
     /// Returns true if any AWG parameter has a non-default value.
     var hasNonDefaultValues: Bool {
@@ -279,7 +423,8 @@ struct AmneziaWGPrefs: Codable {
         (H1?.hasValue == true) ||
         (H2?.hasValue == true) ||
         (H3?.hasValue == true) ||
-        (H4?.hasValue == true)
+        (H4?.hasValue == true) ||
+        isV3
     }
 
     /// Human-readable summary of non-default AWG parameters.
@@ -303,6 +448,25 @@ struct AmneziaWGPrefs: Codable {
                 else { parts.append("\(label)=\(h.min!)-\(h.max!)") }
             }
         }
+        if isV3 {
+            if HeaderProtectionKey?.isEmpty == false,
+               HeaderProtectionKey != Self.zeroHeaderProtectionKey {
+                parts.append("HeaderProtectionKey=set")
+            }
+            for (label, value) in [
+                ("ContentPaddingAddition", ContentPaddingAddition),
+                ("RekeyAfterTime", RekeyAfterTime),
+                ("RekeyTimeout", RekeyTimeout),
+                ("RejectAfterTime", RejectAfterTime),
+                ("KeepaliveTimeout", KeepaliveTimeout),
+                ("MaxHandshakeAttempts", MaxHandshakeAttempts),
+            ] where value?.hasValue == true {
+                let range = value!
+                parts.append(range.isFixedValue
+                    ? "\(label)=\(range.min!)"
+                    : "\(label)=\(range.min!)-\(range.max!)")
+            }
+        }
         return parts.isEmpty ? "Base Config" : parts.joined(separator: "\n")
     }
 }
@@ -311,8 +475,131 @@ struct MagicHeaderRange: Codable {
     let min: Int64?
     let max: Int64?
 
+    init(min: Int64?, max: Int64?) {
+        self.min = min
+        self.max = max
+    }
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if let value = try? single.decode(Int64.self) {
+            try Self.validate(value)
+            min = value
+            max = value
+            return
+        }
+        if let text = try? single.decode(String.self) {
+            let components = text.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let lower = Int64(components[0].trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw DecodingError.dataCorruptedError(in: single, debugDescription: "Invalid AWG range")
+            }
+            let upper: Int64
+            if components.count == 2,
+               let parsed = Int64(components[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                upper = parsed
+            } else if components.count == 1 {
+                upper = lower
+            } else {
+                throw DecodingError.dataCorruptedError(in: single, debugDescription: "Invalid AWG range")
+            }
+            try Self.validate(lower)
+            try Self.validate(upper)
+            guard lower <= upper else {
+                throw DecodingError.dataCorruptedError(in: single, debugDescription: "AWG range min exceeds max")
+            }
+            min = lower
+            max = upper
+            return
+        }
+
+        let keyed = try decoder.container(keyedBy: FlexibleAWGCodingKey.self)
+        func value(named name: String) throws -> Int64? {
+            guard let key = keyed.allKeys.first(where: {
+                normalizedAWGJSONKey($0.stringValue) == normalizedAWGJSONKey(name)
+            }) else { return nil }
+            return try keyed.decodeIfPresent(Int64.self, forKey: key)
+        }
+        let lower = try value(named: "min") ?? 0
+        let upper = try value(named: "max") ?? 0
+        try Self.validate(lower)
+        try Self.validate(upper)
+        guard lower <= upper else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "AWG range min exceeds max")
+            )
+        }
+        min = lower
+        max = upper
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: RangeCodingKey.self)
+        try container.encode(min ?? 0, forKey: .min)
+        try container.encode(max ?? 0, forKey: .max)
+    }
+
+    private static func validate(_ value: Int64) throws {
+        guard (0...4_294_967_295).contains(value) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "AWG range must be 0-4294967295")
+            )
+        }
+    }
+
     var hasValue: Bool { min != nil && max != nil && (min != 0 || max != 0) }
     var isFixedValue: Bool { min != nil && max != nil && min == max }
+
+    private enum RangeCodingKey: String, CodingKey {
+        case min, max
+    }
+}
+
+private struct FlexibleAWGCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+private enum CanonicalAWGCodingKey: String, CodingKey {
+    case JC, JMin, JMax, S1, S2, S3, S4
+    case I1, I2, I3, I4, I5
+    case H1, H2, H3, H4
+    case HeaderProtectionKey
+    case ContentPaddingAddition
+    case RekeyAfterTime
+    case RekeyTimeout
+    case RejectAfterTime
+    case KeepaliveTimeout
+    case MaxHandshakeAttempts
+}
+
+private func normalizedAWGJSONKey(_ value: String) -> String {
+    value.lowercased().replacingOccurrences(of: "_", with: "")
+}
+
+/// Decodes either a bare AWG config or a prefs-shaped {"AmneziaWG": {...}}
+/// wrapper without letting an unrelated object silently become an empty config.
+func decodeAmneziaWGConfigJSON(_ data: Data) throws -> AmneziaWGPrefs {
+    if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let wrapped = object.first(where: {
+           normalizedAWGJSONKey($0.key) == normalizedAWGJSONKey("AmneziaWG")
+       })?.value {
+        if wrapped is NSNull {
+            return .empty
+        }
+        let nested = try JSONSerialization.data(withJSONObject: wrapped)
+        return try JSONDecoder().decode(AmneziaWGPrefs.self, from: nested)
+    }
+    return try JSONDecoder().decode(AmneziaWGPrefs.self, from: data)
 }
 
 /// Result from the awg-sync-peers LocalAPI endpoint.
@@ -322,7 +609,14 @@ struct AwgPeerResult: Codable {
     let config: AmneziaWGPrefs?
     let error: String?
 
-    var hasAwgConfig: Bool { config != nil && error == nil }
+    var lookupError: String? {
+        guard let error = error?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !error.isEmpty else { return nil }
+        return error
+    }
+
+    var hasAwgConfig: Bool { config?.hasNonDefaultValues == true && lookupError == nil }
+    var isStandardWireGuard: Bool { config?.hasNonDefaultValues != true && lookupError == nil }
 }
 
 /// Request body for the awg-sync-apply LocalAPI endpoint.

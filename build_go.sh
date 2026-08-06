@@ -45,21 +45,22 @@ case "${1:-}" in
 esac
 
 # Refuse to produce an AwgScale framework from upstream Tailscale or a
-# different WireGuard module by accident. These are the released AWG v2 forks
-# selected by this app's go.mod.
+# different WireGuard module by accident. These are the AWG v2/v3-compatible
+# forks selected by this app's go.mod. The Tailscale pseudo-version includes
+# the post-1.102.2 live-peer synchronization fix also used by Android.
 TAILSCALE_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' tailscale.com)"
 TAILSCALE_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' tailscale.com)"
 WIREGUARD_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' github.com/LiuTangLei/wireguard-go)"
 WIREGUARD_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/LiuTangLei/wireguard-go)"
 
 if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
-      "$TAILSCALE_VERSION" != "v1.98.10" ]]; then
-    echo "error: expected github.com/LiuTangLei/tailscale v1.98.10, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+      "$TAILSCALE_VERSION" != "v1.102.3-0.20260806045550-6c744f881c4e" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.102.3-0.20260806045550-6c744f881c4e, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
     exit 1
 fi
 if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||
-      "$WIREGUARD_VERSION" != "v0.0.21" ]]; then
-    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.21, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
+      "$WIREGUARD_VERSION" != "v0.0.30" ]]; then
+    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.30, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
     exit 1
 fi
 echo "Using $TAILSCALE_SOURCE $TAILSCALE_VERSION"

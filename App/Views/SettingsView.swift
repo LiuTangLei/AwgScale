@@ -275,6 +275,19 @@ struct AwgSettingsView: View {
     @State private var h3Max = ""
     @State private var h4Min = ""
     @State private var h4Max = ""
+    @State private var headerProtectionKey = ""
+    @State private var contentPaddingAdditionMin = ""
+    @State private var contentPaddingAdditionMax = ""
+    @State private var rekeyAfterTimeMin = ""
+    @State private var rekeyAfterTimeMax = ""
+    @State private var rekeyTimeoutMin = ""
+    @State private var rekeyTimeoutMax = ""
+    @State private var rejectAfterTimeMin = ""
+    @State private var rejectAfterTimeMax = ""
+    @State private var keepaliveTimeoutMin = ""
+    @State private var keepaliveTimeoutMax = ""
+    @State private var maxHandshakeAttemptsMin = ""
+    @State private var maxHandshakeAttemptsMax = ""
     @State private var isLoading = true
     @State private var isSaving = false
     @State private var errorMessage: String?
@@ -291,7 +304,7 @@ struct AwgSettingsView: View {
                         HStack(spacing: 4) {
                             Text("\u{2605}")
                                 .foregroundColor(Color(red: 1.0, green: 0.84, blue: 0.0))
-                            Text("Enabled")
+                            Text(appState.currentAwgConfig?.profileVersion ?? "Enabled")
                                 .foregroundColor(.green)
                         }
                         .font(.caption)
@@ -374,6 +387,28 @@ struct AwgSettingsView: View {
                 rangeField("H2", min: $h2Min, max: $h2Max)
                 rangeField("H3", min: $h3Min, max: $h3Max)
                 rangeField("H4", min: $h4Min, max: $h4Max)
+            }
+
+            Section {
+                stringField("Header Protection Key", text: $headerProtectionKey)
+                rangeField(
+                    "Content Padding Addition",
+                    min: $contentPaddingAdditionMin,
+                    max: $contentPaddingAdditionMax
+                )
+                rangeField("Rekey After Time", min: $rekeyAfterTimeMin, max: $rekeyAfterTimeMax)
+                rangeField("Rekey Timeout", min: $rekeyTimeoutMin, max: $rekeyTimeoutMax)
+                rangeField("Reject After Time", min: $rejectAfterTimeMin, max: $rejectAfterTimeMax)
+                rangeField("Keepalive Timeout", min: $keepaliveTimeoutMin, max: $keepaliveTimeoutMax)
+                rangeField(
+                    "Max Handshake Attempts",
+                    min: $maxHandshakeAttemptsMin,
+                    max: $maxHandshakeAttemptsMax
+                )
+            } header: {
+                Text("AWG v3")
+            } footer: {
+                Text("Leave these fields empty for an AWG v2 profile. A non-zero header protection key must contain 64 hexadecimal characters and requires S1-S4 to be at least 12.")
             }
 
             Section {
@@ -580,14 +615,19 @@ struct AwgSettingsView: View {
     }
 
     private func buildConfig() throws -> AmneziaWGPrefs {
-        AmneziaWGPrefs(
+        let s1Value = try parseUInt16(s1, label: "S1")
+        let s2Value = try parseUInt16(s2, label: "S2")
+        let s3Value = try parseUInt16(s3, label: "S3")
+        let s4Value = try parseUInt16(s4, label: "S4")
+        let protectionKey = try parseHeaderProtectionKey(headerProtectionKey)
+        let config = AmneziaWGPrefs(
             JC: try parseUInt16(jc, label: "JC"),
             JMin: try parseUInt16(jMin, label: "JMin"),
             JMax: try parseUInt16(jMax, label: "JMax"),
-            S1: try parseUInt16(s1, label: "S1"),
-            S2: try parseUInt16(s2, label: "S2"),
-            S3: try parseUInt16(s3, label: "S3"),
-            S4: try parseUInt16(s4, label: "S4"),
+            S1: s1Value,
+            S2: s2Value,
+            S3: s3Value,
+            S4: s4Value,
             I1: optionalString(i1),
             I2: optionalString(i2),
             I3: optionalString(i3),
@@ -596,22 +636,56 @@ struct AwgSettingsView: View {
             H1: try parseRange("H1", minText: h1Min, maxText: h1Max),
             H2: try parseRange("H2", minText: h2Min, maxText: h2Max),
             H3: try parseRange("H3", minText: h3Min, maxText: h3Max),
-            H4: try parseRange("H4", minText: h4Min, maxText: h4Max)
+            H4: try parseRange("H4", minText: h4Min, maxText: h4Max),
+            HeaderProtectionKey: protectionKey,
+            ContentPaddingAddition: try parseRange(
+                "Content Padding Addition",
+                minText: contentPaddingAdditionMin,
+                maxText: contentPaddingAdditionMax
+            ),
+            RekeyAfterTime: try parseRange(
+                "Rekey After Time",
+                minText: rekeyAfterTimeMin,
+                maxText: rekeyAfterTimeMax
+            ),
+            RekeyTimeout: try parseRange(
+                "Rekey Timeout",
+                minText: rekeyTimeoutMin,
+                maxText: rekeyTimeoutMax
+            ),
+            RejectAfterTime: try parseRange(
+                "Reject After Time",
+                minText: rejectAfterTimeMin,
+                maxText: rejectAfterTimeMax
+            ),
+            KeepaliveTimeout: try parseRange(
+                "Keepalive Timeout",
+                minText: keepaliveTimeoutMin,
+                maxText: keepaliveTimeoutMax
+            ),
+            MaxHandshakeAttempts: try parseRange(
+                "Max Handshake Attempts",
+                minText: maxHandshakeAttemptsMin,
+                maxText: maxHandshakeAttemptsMax
+            )
         )
+
+        if config.isV3,
+           let key = protectionKey,
+           key != String(repeating: "0", count: 64),
+           [s1Value, s2Value, s3Value, s4Value].contains(where: { ($0 ?? 0) < 12 }) {
+            throw AwgSettingsError("S1-S4 must each be at least 12 when header protection is enabled")
+        }
+        return config
     }
 
     private func decodeConfigJSON(_ text: String) throws -> AmneziaWGPrefs {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw AwgSettingsError("JSON input is empty") }
         let data = Data(trimmed.utf8)
-        let decoder = JSONDecoder()
-
         do {
-            return try decoder.decode(AmneziaWGPrefs.self, from: data)
+            return try decodeAmneziaWGConfigJSON(data)
         } catch {
-            if let wrapped = try? decoder.decode(AwgConfigJSONWrapper.self, from: data), let config = wrapped.AmneziaWG {
-                return config
-            }
             throw AwgSettingsError("Invalid JSON: \(error.localizedDescription)")
         }
     }
@@ -644,6 +718,19 @@ struct AwgSettingsView: View {
         h3Max = text(config?.H3?.max)
         h4Min = text(config?.H4?.min)
         h4Max = text(config?.H4?.max)
+        headerProtectionKey = config?.HeaderProtectionKey ?? ""
+        contentPaddingAdditionMin = text(config?.ContentPaddingAddition?.min)
+        contentPaddingAdditionMax = text(config?.ContentPaddingAddition?.max)
+        rekeyAfterTimeMin = text(config?.RekeyAfterTime?.min)
+        rekeyAfterTimeMax = text(config?.RekeyAfterTime?.max)
+        rekeyTimeoutMin = text(config?.RekeyTimeout?.min)
+        rekeyTimeoutMax = text(config?.RekeyTimeout?.max)
+        rejectAfterTimeMin = text(config?.RejectAfterTime?.min)
+        rejectAfterTimeMax = text(config?.RejectAfterTime?.max)
+        keepaliveTimeoutMin = text(config?.KeepaliveTimeout?.min)
+        keepaliveTimeoutMax = text(config?.KeepaliveTimeout?.max)
+        maxHandshakeAttemptsMin = text(config?.MaxHandshakeAttempts?.min)
+        maxHandshakeAttemptsMax = text(config?.MaxHandshakeAttempts?.max)
     }
 
     private func loadJSON(from config: AmneziaWGPrefs?) {
@@ -697,6 +784,17 @@ struct AwgSettingsView: View {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private func parseHeaderProtectionKey(_ value: String) throws -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hexadecimalDigits = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed.count == 64,
+              trimmed.unicodeScalars.allSatisfy({ hexadecimalDigits.contains($0) }) else {
+            throw AwgSettingsError("Header Protection Key must contain exactly 64 hexadecimal characters")
+        }
+        return trimmed.lowercased()
+    }
+
     private func text(_ value: Int?) -> String {
         guard let value, value != 0 else { return "" }
         return String(value)
@@ -706,10 +804,6 @@ struct AwgSettingsView: View {
         guard let value, value != 0 else { return "" }
         return String(value)
     }
-}
-
-private struct AwgConfigJSONWrapper: Decodable {
-        let AmneziaWG: AmneziaWGPrefs?
 }
 
 private struct AwgSettingsError: LocalizedError {

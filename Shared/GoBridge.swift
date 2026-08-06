@@ -349,8 +349,13 @@ struct NotifyWatchOpt {
     static let initialOutgoingFiles = 64
     static let initialHealthState  = 128
     static let rateLimitNetmaps    = 256
+    static let peerChanges         = 1 << 12
 
-    /// Default mask for the iOS notification subscription.
+    /// Default mask for the iOS notification subscription. Since Tailscale
+    /// 1.102, non-Windows clients receive peer updates through PeerChanges;
+    /// RateLimit is intentionally omitted because upstream declares these two
+    /// options incompatible. The Go bridge converts each delta into the full
+    /// NetworkMap snapshot shared by the app and PacketTunnel processes.
     static let defaultMask =
-        netmap | prefs | initialState | initialHealthState | initialOutgoingFiles | rateLimitNetmaps
+        netmap | prefs | initialState | initialHealthState | initialOutgoingFiles | peerChanges
 }

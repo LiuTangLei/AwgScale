@@ -271,22 +271,22 @@ private enum OpenSourceCatalog {
 
     static let runtimeModules = [
         GoRuntimeModule(path: "filippo.io/edwards25519", version: "v1.2.0", sourceNote: nil),
-        GoRuntimeModule(path: "github.com/LiuTangLei/wireguard-go", version: "v0.0.21", sourceNote: nil),
-        GoRuntimeModule(path: "github.com/creachadair/msync", version: "v0.7.1", sourceNote: nil),
+        GoRuntimeModule(path: "github.com/LiuTangLei/wireguard-go", version: "v0.0.30", sourceNote: "AWG v2/v3-compatible fork"),
+        GoRuntimeModule(path: "github.com/creachadair/msync", version: "v0.8.1", sourceNote: nil),
         GoRuntimeModule(path: "github.com/fxamacker/cbor/v2", version: "v2.9.0", sourceNote: nil),
         GoRuntimeModule(path: "github.com/gaissmai/bart", version: "v0.26.1", sourceNote: nil),
-        GoRuntimeModule(path: "github.com/go-json-experiment/json", version: "v0.0.0-20250813024750-ebf49471dced", sourceNote: nil),
+        GoRuntimeModule(path: "github.com/go-json-experiment/json", version: "v0.0.0-20260214004413-d219187c3433", sourceNote: nil),
         GoRuntimeModule(path: "github.com/golang/groupcache", version: "v0.0.0-20241129210726-2c02b8208cf8", sourceNote: nil),
         GoRuntimeModule(path: "github.com/google/btree", version: "v1.1.3", sourceNote: nil),
         GoRuntimeModule(path: "github.com/hdevalence/ed25519consensus", version: "v0.2.0", sourceNote: nil),
-        GoRuntimeModule(path: "github.com/klauspost/compress", version: "v1.18.5", sourceNote: nil),
+        GoRuntimeModule(path: "github.com/klauspost/compress", version: "v1.19.1", sourceNote: nil),
         GoRuntimeModule(path: "github.com/pires/go-proxyproto", version: "v0.8.1", sourceNote: nil),
         GoRuntimeModule(path: "github.com/tailscale/peercred", version: "v0.0.0-20250107143737-35a0c7bd7edc", sourceNote: nil),
         GoRuntimeModule(path: "github.com/x448/float16", version: "v0.8.4", sourceNote: nil),
         GoRuntimeModule(path: "go4.org/mem", version: "v0.0.0-20240501181205-ae6ca9944745", sourceNote: nil),
         GoRuntimeModule(path: "go4.org/netipx", version: "v0.0.0-20231129151722-fdeea329fbba", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/crypto", version: "v0.54.0", sourceNote: nil),
-        GoRuntimeModule(path: "golang.org/x/exp", version: "v0.0.0-20250620022241-b7579e27df2b", sourceNote: nil),
+        GoRuntimeModule(path: "golang.org/x/exp", version: "v0.0.0-20260410095643-746e56fc9e2f", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/mobile", version: "v0.0.0-20260312152759-81488f6aeb60", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/mod", version: "v0.37.0", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/net", version: "v0.56.0", sourceNote: nil),
@@ -294,10 +294,10 @@ private enum OpenSourceCatalog {
         GoRuntimeModule(path: "golang.org/x/sys", version: "v0.47.0", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/term", version: "v0.45.0", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/text", version: "v0.40.0", sourceNote: nil),
-        GoRuntimeModule(path: "golang.org/x/time", version: "v0.12.0", sourceNote: nil),
+        GoRuntimeModule(path: "golang.org/x/time", version: "v0.15.0", sourceNote: nil),
         GoRuntimeModule(path: "golang.org/x/tools", version: "v0.47.0", sourceNote: nil),
         GoRuntimeModule(path: "gvisor.dev/gvisor", version: "v0.0.0-20260224225140-573d5e7127a8", sourceNote: nil),
-        GoRuntimeModule(path: "tailscale.com", version: "v1.98.10", sourceNote: "source replaced by github.com/LiuTangLei/tailscale")
+        GoRuntimeModule(path: "tailscale.com", version: "v1.102.2", sourceNote: "source replaced by github.com/LiuTangLei/tailscale v1.102.3-0.20260806045550-6c744f881c4e")
     ]
 }
 

@@ -22,14 +22,42 @@ func (app *App) refreshUsableDERPMapForLocalAPI(endpoint string) {
 		return
 	}
 	dm := b.backend.DERPMap()
-	sanitized, changed := sanitizeDERPMapForIOS(dm, b.backend.Prefs().ControlURL())
-	if !changed {
-		return
+	app.installDERPMapSourceOnce(dm, func() bool {
+		sanitized, changed := sanitizeDERPMapForIOS(dm, b.backend.Prefs().ControlURL())
+		if !changed {
+			return false
+		}
+		if mc := b.sys.MagicSock.Get(); mc != nil {
+			log.Printf("derpmap: installed iOS DERP address fallbacks before LocalAPI %s", endpoint)
+			mc.SetDERPMap(sanitized)
+			return true
+		}
+		return false
+	})
+}
+
+// installDERPMapSourceOnce runs install at most once for a particular DERPMap
+// snapshot. LocalBackend keeps the same pointer until control supplies a new
+// network map. Reinstalling a sanitized clone for every LocalAPI call or peer
+// delta makes magicsock treat its regions as redefined, which tears down active
+// DERP connections and can lose in-flight disco responses such as AWG sync.
+//
+// A failed install is deliberately not remembered, so a later LocalAPI call
+// can retry after MagicSock or DNS becomes ready.
+func (app *App) installDERPMapSourceOnce(source *tailcfg.DERPMap, install func() bool) bool {
+	if source == nil {
+		return false
 	}
-	if mc := b.sys.MagicSock.Get(); mc != nil {
-		log.Printf("derpmap: installed iOS DERP address fallbacks before LocalAPI %s", endpoint)
-		mc.SetDERPMap(sanitized)
+	app.derpMapMu.Lock()
+	defer app.derpMapMu.Unlock()
+	if app.installedDERPMap == source {
+		return false
 	}
+	if !install() {
+		return false
+	}
+	app.installedDERPMap = source
+	return true
 }
 
 func sanitizeDERPMapForIOS(dm *tailcfg.DERPMap, controlURL string) (*tailcfg.DERPMap, bool) {

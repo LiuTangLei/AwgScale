@@ -29,7 +29,6 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsd"
 	"tailscale.com/types/key"
-	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/views"
 	"tailscale.com/util/eventbus"
@@ -64,6 +63,8 @@ type App struct {
 	tunnelConfigMgr    tunnelConfigManager
 	sshMu              sync.Mutex
 	sshSessions        map[string]*inAppSSHSession
+	derpMapMu          sync.Mutex
+	installedDERPMap   *tailcfg.DERPMap
 	inAppProxyMu       sync.Mutex
 	inAppProxyListener net.Listener
 	inAppProxyBackend  *backend
@@ -195,7 +196,9 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 	sys := tsd.NewSystem()
 	sys.Set(store)
 
-	logf := logger.RusagePrefixLog(log.Printf)
+	// Tailscale 1.102 removed RusagePrefixLog after runtime metrics took over
+	// process-memory reporting. Keep the platform logger as the backend Logf.
+	logf := log.Printf
 	tunDev := newPendingTUN()
 	a.mu.Lock()
 	if a.packetCallback != nil {
@@ -276,7 +279,7 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 	// Taildrop PUT to time out at the netstack TCP dial. See upstream tailscale#18423.
 	ns.CheckLocalTransportEndpoints = true
 	dialer.UseNetstackForIP = func(ip netip.Addr) bool {
-		_, ok := engine.PeerForIP(ip)
+		_, ok := b.peerForIP(ip)
 		return ok
 	}
 	dialer.NetstackDialTCP = func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
@@ -332,6 +335,17 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 	}()
 
 	return b, nil
+}
+
+// peerForIP delegates route ownership to LocalBackend's live node and route
+// indexes. Since Tailscale 1.102 the Engine no longer exposes PeerForIP; the
+// backend is the authoritative lookup and also respects current exit-node and
+// subnet-route preferences.
+func (b *backend) peerForIP(ip netip.Addr) (wgengine.PeerForIP, bool) {
+	if b == nil || b.backend == nil {
+		return wgengine.PeerForIP{}, false
+	}
+	return b.backend.PeerForIP(ip)
 }
 
 // defaultRouteExcludeRoutes returns underlay routes that NEPacketTunnelProvider

@@ -67,10 +67,6 @@ type inAppTCPResponse struct {
 func (a *App) withInAppToolsHandler(base http.Handler, b *backend) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/localapi/v0/awg-sync-apply":
-			a.handleAWGSyncApply(w, r, b)
-		case "/localapi/v0/awg-sync-peers":
-			a.handleAWGSyncPeers(w, r, b)
 		case "/localapi/v0/awgscale/http-fetch":
 			a.handleInAppHTTPFetch(w, r, b)
 		case "/localapi/v0/awgscale/browser-proxy":
@@ -596,14 +592,14 @@ func preferIPv4(addrs []netip.Addr) []netip.Addr {
 }
 
 func inAppAddrRoutableWithoutExitNode(b *backend, addr netip.Addr) bool {
-	if b == nil || b.engine == nil {
+	if b == nil || b.backend == nil {
 		return false
 	}
 	addr = addr.Unmap()
 	if tsaddr.IsTailscaleIP(addr) {
 		return true
 	}
-	_, ok := b.engine.PeerForIP(addr)
+	_, ok := b.peerForIP(addr)
 	return ok
 }
 

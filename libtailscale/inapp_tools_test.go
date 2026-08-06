@@ -90,6 +90,28 @@ func TestInAppHostnameShouldStayInTailnetWithoutBackend(t *testing.T) {
 	}
 }
 
+func TestAWGLocalAPIRoutesDelegateToCoreHandler(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Core-LocalAPI", "true")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := (&App{}).withInAppToolsHandler(base, nil)
+
+	for _, endpoint := range []string{
+		"/localapi/v0/awg-sync-peers",
+		"/localapi/v0/awg-sync-apply",
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, endpoint, nil))
+		if got := recorder.Header().Get("X-Core-LocalAPI"); got != "true" {
+			t.Fatalf("%s was intercepted instead of delegated to core LocalAPI", endpoint)
+		}
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("%s status = %d, want %d", endpoint, recorder.Code, http.StatusNoContent)
+		}
+	}
+}
+
 func TestInAppSSHWaitForOutputReturnsOnAppend(t *testing.T) {
 	session := &inAppSSHSession{
 		done:        make(chan struct{}),

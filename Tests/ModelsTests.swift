@@ -81,6 +81,125 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(dict["ExitNodeIDSet"])
     }
 
+    // MARK: - AWG v2/v3 compatibility
+
+    func testDecodeAWGV3SnakeCaseAndLegacyScalarRanges() throws {
+        let key = String(repeating: "42", count: 32)
+        let json = """
+        {
+            "jc": 4,
+            "h1": 123456,
+            "header_protection_key": "\(key)",
+            "content_padding_addition": "5-31",
+            "rekey_after_time": 120,
+            "max_handshake_attempts": {"min": 8, "max": 12}
+        }
+        """.data(using: .utf8)!
+
+        let config = try JSONDecoder().decode(AmneziaWGPrefs.self, from: json)
+        XCTAssertEqual(config.JC, 4)
+        XCTAssertEqual(config.H1?.min, 123456)
+        XCTAssertEqual(config.H1?.max, 123456)
+        XCTAssertEqual(config.HeaderProtectionKey, key)
+        XCTAssertEqual(config.ContentPaddingAddition?.min, 5)
+        XCTAssertEqual(config.ContentPaddingAddition?.max, 31)
+        XCTAssertEqual(config.RekeyAfterTime?.min, 120)
+        XCTAssertEqual(config.RekeyAfterTime?.max, 120)
+        XCTAssertEqual(config.MaxHandshakeAttempts?.min, 8)
+        XCTAssertEqual(config.MaxHandshakeAttempts?.max, 12)
+        XCTAssertTrue(config.isV3)
+        XCTAssertEqual(config.profileVersion, "AWG v3")
+    }
+
+    func testDecodeLegacyAWGV2AndPrefsWrapper() throws {
+        let json = """
+        {
+            "AmneziaWG": {
+                "JC": 3,
+                "JMin": 40,
+                "JMax": 70,
+                "H1": 123456,
+                "I1": "<b 0xc0><r 32>"
+            }
+        }
+        """.data(using: .utf8)!
+
+        let config = try decodeAmneziaWGConfigJSON(json)
+        XCTAssertEqual(config.JC, 3)
+        XCTAssertEqual(config.H1?.min, 123456)
+        XCTAssertEqual(config.I1, "<b 0xc0><r 32>")
+        XCTAssertFalse(config.isV3)
+        XCTAssertTrue(config.hasNonDefaultValues)
+        XCTAssertEqual(config.profileVersion, "AWG v2")
+    }
+
+    func testAWGV3CanonicalEncodingPreservesAllFields() throws {
+        let config = AmneziaWGPrefs(
+            S1: 12,
+            S2: 12,
+            S3: 12,
+            S4: 12,
+            HeaderProtectionKey: String(repeating: "ab", count: 32),
+            ContentPaddingAddition: .init(min: 5, max: 31),
+            RekeyAfterTime: .init(min: 120, max: 180),
+            RekeyTimeout: .init(min: 5, max: 8),
+            RejectAfterTime: .init(min: 180, max: 240),
+            KeepaliveTimeout: .init(min: 10, max: 20),
+            MaxHandshakeAttempts: .init(min: 8, max: 12)
+        )
+
+        let encoded = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(AmneziaWGPrefs.self, from: encoded)
+        XCTAssertEqual(decoded.HeaderProtectionKey, config.HeaderProtectionKey)
+        XCTAssertEqual(decoded.ContentPaddingAddition?.max, 31)
+        XCTAssertEqual(decoded.RekeyAfterTime?.max, 180)
+        XCTAssertEqual(decoded.RekeyTimeout?.min, 5)
+        XCTAssertEqual(decoded.RejectAfterTime?.max, 240)
+        XCTAssertEqual(decoded.KeepaliveTimeout?.min, 10)
+        XCTAssertEqual(decoded.MaxHandshakeAttempts?.max, 12)
+        XCTAssertTrue(decoded.isV3)
+    }
+
+    func testAWGAllZeroProtectionKeyRemainsStandardWireGuard() throws {
+        let json = """
+        {"header_protection_key": "\(String(repeating: "0", count: 64))"}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(AmneziaWGPrefs.self, from: json)
+        XCTAssertFalse(config.isV3)
+        XCTAssertFalse(config.hasNonDefaultValues)
+        XCTAssertEqual(config.profileVersion, "Standard WireGuard")
+    }
+
+    func testAWGDecoderRejectsUnrelatedObject() {
+        let json = #"{"unrelated": true}"#.data(using: .utf8)!
+        XCTAssertThrowsError(try decodeAmneziaWGConfigJSON(json))
+    }
+
+    func testAWGPeerResultDistinguishesStandardFromUnavailable() {
+        let standard = AwgPeerResult(nodeKey: "nodekey:standard", hostname: "standard", config: nil, error: nil)
+        XCTAssertTrue(standard.isStandardWireGuard)
+        XCTAssertFalse(standard.hasAwgConfig)
+
+        let unavailable = AwgPeerResult(
+            nodeKey: "nodekey:offline",
+            hostname: "offline",
+            config: nil,
+            error: "request timed out"
+        )
+        XCTAssertFalse(unavailable.isStandardWireGuard)
+        XCTAssertFalse(unavailable.hasAwgConfig)
+        XCTAssertEqual(unavailable.lookupError, "request timed out")
+
+        let v3 = AwgPeerResult(
+            nodeKey: "nodekey:v3",
+            hostname: "v3",
+            config: .init(RekeyAfterTime: .init(min: 120, max: 180)),
+            error: nil
+        )
+        XCTAssertTrue(v3.hasAwgConfig)
+        XCTAssertFalse(v3.isStandardWireGuard)
+    }
+
     // MARK: - LoginProfile
 
     func testDecodeLoginProfile() throws {
@@ -235,8 +354,11 @@ final class ModelsTests: XCTestCase {
     // MARK: - NotifyWatchOpt
 
     func testDefaultMask() {
-        // Should match: Netmap(8) | Prefs(4) | InitialState(2) | InitialOutgoingFiles(64) | InitialHealthState(128) | RateLimitNetmaps(256)
-        let expected = 8 | 4 | 2 | 64 | 128 | 256  // = 462
+        // Tailscale 1.102 requires PeerChanges for non-Windows updates and
+        // rejects combining it with the legacy RateLimit option.
+        let expected = 8 | 4 | 2 | 64 | 128 | (1 << 12)  // = 4302
         XCTAssertEqual(NotifyWatchOpt.defaultMask, expected)
+        XCTAssertEqual(NotifyWatchOpt.defaultMask & NotifyWatchOpt.rateLimitNetmaps, 0)
+        XCTAssertNotEqual(NotifyWatchOpt.defaultMask & NotifyWatchOpt.peerChanges, 0)
     }
 }

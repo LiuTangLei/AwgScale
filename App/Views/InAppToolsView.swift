@@ -2176,11 +2176,8 @@ struct TailnetTerminalView: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundColor(TerminalTheme.secondaryText)
                                 ZStack(alignment: .topLeading) {
-                                    TextEditor(text: $privateKey)
-                                        .font(.system(.footnote, design: .monospaced))
-                                        .foregroundColor(.white)
+                                    TerminalPrivateKeyEditor(text: $privateKey)
                                         .frame(minHeight: 112)
-                                        .padding(6)
                                         .background(TerminalTheme.input)
                                         .cornerRadius(14)
                                     if privateKey.isEmpty {
@@ -2761,6 +2758,52 @@ private struct TerminalConnectionField: View {
             .frame(height: 46)
             .background(TerminalTheme.input)
             .cornerRadius(14)
+        }
+    }
+}
+
+private struct TerminalPrivateKeyEditor: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.delegate = context.coordinator
+        textView.backgroundColor = .clear
+        textView.textColor = .white
+        textView.tintColor = UIColor(TerminalTheme.green)
+        textView.font = .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .footnote).pointSize, weight: .regular)
+        textView.adjustsFontForContentSizeCategory = true
+        textView.keyboardType = .asciiCapable
+        textView.autocapitalizationType = .none
+        textView.autocorrectionType = .no
+        textView.spellCheckingType = .no
+        textView.smartDashesType = .no
+        textView.smartQuotesType = .no
+        textView.smartInsertDeleteType = .no
+        textView.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.accessibilityLabel = "Private Key"
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        guard textView.text != text else { return }
+        textView.text = text
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        @Binding private var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            text = textView.text
         }
     }
 }

@@ -58,8 +58,9 @@ xcodebuild build -project AwgScale.xcodeproj -scheme AwgScale \
 ```
 
 `build_go.sh` verifies that the framework resolves
-`github.com/LiuTangLei/tailscale v1.98.10` and
-`github.com/LiuTangLei/wireguard-go v0.0.21` before compiling.
+`github.com/LiuTangLei/tailscale` at the 1.102.2-compatible live-peer-sync
+revision and `github.com/LiuTangLei/wireguard-go v0.0.30` before compiling.
+This runtime supports both historical AWG v2 profiles and AWG v3 profiles.
 
 App-only UI can be developed in the Simulator. The system VPN tunnel requires a device with a valid Network Extension entitlement.
 

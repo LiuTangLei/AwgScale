@@ -2209,29 +2209,36 @@ class AppState: ObservableObject {
         do {
             let awgPeers = try await activeLocalAPIClient().awgPeers()
 
-            var statusMap: [String: Bool] = [:]
             var dataMap: [String: AwgPeerResult] = [:]
 
             for peer in awgPeers {
                 for key in awgKeyCandidates(peer.nodeKey) {
-                    statusMap[key] = (statusMap[key] == true) || peer.hasAwgConfig
                     dataMap[key] = preferredAwgPeer(existing: dataMap[key], new: peer)
                 }
                 for key in peerKeyCandidates(peer.hostname) {
-                    statusMap[key] = (statusMap[key] == true) || peer.hasAwgConfig
                     dataMap[key] = preferredAwgPeer(existing: dataMap[key], new: peer)
                 }
             }
 
-            mergeAwgPeerStatus(statusMap: statusMap, dataMap: dataMap)
+            mergeAwgPeerStatus(dataMap: dataMap)
 
             if showMessages {
                 let awgCount = awgPeers.filter(\.hasAwgConfig).count
+                let unavailableCount = awgPeers.filter { $0.lookupError != nil }.count
+                let determinedCount = awgPeers.count - unavailableCount
                 let total = awgPeers.count
                 if total > 0 {
-                    awgStatusMessage = awgCount > 0
-                        ? "Found \(awgCount)/\(total) peers with AWG config"
-                        : "Checked \(total) peers, no AWG config found"
+                    if awgCount > 0 && unavailableCount > 0 {
+                        awgStatusMessage = "Found \(awgCount)/\(determinedCount) reachable peers with AWG config; \(unavailableCount) temporarily unavailable"
+                    } else if awgCount > 0 {
+                        awgStatusMessage = "Found \(awgCount)/\(determinedCount) peers with AWG config"
+                    } else if determinedCount == 0 {
+                        awgStatusMessage = "Could not query AWG status from \(unavailableCount) peers; please retry"
+                    } else if unavailableCount > 0 {
+                        awgStatusMessage = "No AWG config found on \(determinedCount) checked peers; \(unavailableCount) could not be queried, please retry"
+                    } else {
+                        awgStatusMessage = "Checked \(determinedCount) peers, no AWG config found"
+                    }
                 } else {
                     awgStatusMessage = "No peers found"
                 }
@@ -2292,7 +2299,12 @@ class AppState: ObservableObject {
         // Verify peer has AWG config
         let peerData = awgData(for: peer)
 
-        if let peerData, !peerData.hasAwgConfig {
+        if let lookupError = peerData?.lookupError {
+            awgStatusMessage = "Could not verify AWG config on \(hostname): \(lookupError). Refresh and try again."
+            return
+        }
+
+        if let peerData, peerData.isStandardWireGuard {
             awgStatusMessage = "Peer \(hostname) has no AWG config"
             return
         }
@@ -2589,15 +2601,23 @@ class AppState: ObservableObject {
         if new.hasAwgConfig && !existing.hasAwgConfig {
             return new
         }
+        if existing.lookupError != nil && new.lookupError == nil {
+            return new
+        }
         return existing
     }
 
-    private func mergeAwgPeerStatus(statusMap: [String: Bool], dataMap: [String: AwgPeerResult]) {
-        for (key, value) in statusMap {
-            awgPeersStatus[key] = (awgPeersStatus[key] == true) || value
-        }
+    private func mergeAwgPeerStatus(dataMap: [String: AwgPeerResult]) {
         for (key, peer) in dataMap {
-            awgPeersData[key] = preferredAwgPeer(existing: awgPeersData[key], new: peer)
+            let existing = awgPeersData[key]
+            if peer.lookupError == nil || existing == nil || existing?.lookupError != nil {
+                awgPeersData[key] = peer
+            }
+            if peer.lookupError == nil {
+                awgPeersStatus[key] = peer.hasAwgConfig
+            } else if awgPeersStatus[key] == nil {
+                awgPeersStatus[key] = false
+            }
         }
     }
 
@@ -2610,6 +2630,8 @@ class AppState: ObservableObject {
             return "Peer \(hostname) not found or offline"
         } else if message.contains("409") || message.contains("no Amnezia-WG config") {
             return "Peer \(hostname) has no AWG config"
+        } else if message.contains("422") || message.contains("invalid Amnezia-WG config") {
+            return "Peer \(hostname) returned an invalid AWG v2/v3 config"
         } else if message.contains("not reachable for AWG sync yet") {
             return "Peer \(hostname) is not reachable yet, please retry after VPN stabilizes"
         } else if message.contains("VPN tunnel stopped before AWG sync") || message.contains("disconnecting before AWG sync") {

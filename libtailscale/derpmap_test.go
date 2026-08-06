@@ -104,6 +104,38 @@ func TestSanitizeDERPMapSingleLabelHostUsesLanFallback(t *testing.T) {
 	}
 }
 
+func TestInstallDERPMapSourceOnceIsIdempotentAndRetriesFailures(t *testing.T) {
+	app := new(App)
+	first := testDERPMap("first.example.com")
+	second := testDERPMap("second.example.com")
+	installCount := 0
+	install := func() bool {
+		installCount++
+		return true
+	}
+
+	if !app.installDERPMapSourceOnce(first, install) {
+		t.Fatal("first DERP map source was not installed")
+	}
+	if app.installDERPMapSourceOnce(first, install) {
+		t.Fatal("same DERP map source was installed twice")
+	}
+	if !app.installDERPMapSourceOnce(second, install) {
+		t.Fatal("new DERP map source was not installed")
+	}
+	if installCount != 2 {
+		t.Fatalf("install count = %d, want 2", installCount)
+	}
+
+	retry := testDERPMap("retry.example.com")
+	if app.installDERPMapSourceOnce(retry, func() bool { return false }) {
+		t.Fatal("failed DERP map install was reported successful")
+	}
+	if !app.installDERPMapSourceOnce(retry, install) {
+		t.Fatal("failed DERP map install was not retried")
+	}
+}
+
 func testDERPMap(hostname string) *tailcfg.DERPMap {
 	return &tailcfg.DERPMap{
 		Regions: map[int]*tailcfg.DERPRegion{
