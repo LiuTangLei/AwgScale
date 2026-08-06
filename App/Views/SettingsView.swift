@@ -288,7 +288,7 @@ struct AwgSettingsView: View {
     @State private var keepaliveTimeoutMax = ""
     @State private var maxHandshakeAttemptsMin = ""
     @State private var maxHandshakeAttemptsMax = ""
-    @State private var isLoading = true
+    @State private var isLoading = false
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var statusMessage: String?
@@ -354,14 +354,17 @@ struct AwgSettingsView: View {
                 } label: {
                     SettingsRowLabel(title: "Apply JSON Config", systemImage: "curlybraces")
                 }
-                .disabled(isSaving || isLoading || jsonText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    isSaving || isLoading || appState.isAnyAwgOperationInProgress ||
+                    jsonText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
 
                 Button {
                     copyCurrentJSON()
                 } label: {
                     SettingsRowLabel(title: "Copy Current JSON", systemImage: "doc.on.doc")
                 }
-                .disabled(isSaving || isLoading)
+                .disabled(isSaving || isLoading || appState.isAnyAwgOperationInProgress)
             }
 
             Section("Packet Shape") {
@@ -427,7 +430,7 @@ struct AwgSettingsView: View {
                         Spacer()
                     }
                 }
-                .disabled(isSaving || isLoading)
+                .disabled(isSaving || isLoading || appState.isAnyAwgOperationInProgress)
 
                 Button(role: .destructive) {
                     clearConfig()
@@ -438,15 +441,25 @@ struct AwgSettingsView: View {
                         Spacer()
                     }
                 }
-                .disabled(isSaving || isLoading)
+                .disabled(isSaving || isLoading || appState.isAnyAwgOperationInProgress)
             }
         }
         .navigationTitle("Amnezia-WG")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable {
-            await loadConfig()
+            if !appState.isAnyAwgOperationInProgress {
+                await loadConfig()
+            }
         }
         .onAppear {
+            Task {
+                if !appState.isAnyAwgOperationInProgress {
+                    await loadConfig()
+                }
+            }
+        }
+        .onChange(of: appState.isAnyAwgOperationInProgress) { isBusy in
+            guard !isBusy else { return }
             Task {
                 await loadConfig()
             }
@@ -494,6 +507,7 @@ struct AwgSettingsView: View {
 
     @MainActor
     private func loadConfig() async {
+        guard !isLoading, !isSaving, !appState.isAnyAwgOperationInProgress else { return }
         isLoading = true
         errorMessage = nil
         await appState.refreshLocalAwgStatusNow(showMessages: false)
@@ -509,8 +523,6 @@ struct AwgSettingsView: View {
     }
 
     private func clearConfig() {
-        clearFields()
-        jsonText = ""
         Task {
             await applyConfig(.empty)
         }
@@ -560,7 +572,6 @@ struct AwgSettingsView: View {
     private func applyJSONConfigFromText() async {
         do {
             let config = try decodeConfigJSON(jsonText)
-            jsonText = try encodeConfigJSON(config)
             await applyConfig(config)
         } catch {
             errorMessage = error.localizedDescription
@@ -608,6 +619,11 @@ struct AwgSettingsView: View {
             loadJSON(from: appState.currentAwgConfig)
             statusMessage = config.hasNonDefaultValues ? "Saved" : "Cleared"
         } catch {
+            // Re-render the last confirmed/effective prefs. In particular, a
+            // failed Clear must never leave the form looking empty while the
+            // old AWG config is still active.
+            loadFields(from: appState.currentAwgConfig)
+            loadJSON(from: appState.currentAwgConfig)
             errorMessage = error.localizedDescription
         }
 
@@ -739,10 +755,6 @@ struct AwgSettingsView: View {
             return
         }
         jsonText = json
-    }
-
-    private func clearFields() {
-        loadFields(from: nil)
     }
 
     private func parseUInt16(_ value: String, label: String) throws -> Int? {

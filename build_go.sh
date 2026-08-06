@@ -19,6 +19,9 @@ cd "$SCRIPT_DIR"
 # Release builds must use the versioned forks in go.mod, never an ambient
 # parent workspace that happens to contain unreleased protocol changes.
 export GOWORK=off
+# Keep caller-provided build flags, but make dependency resolution immutable.
+# Appending makes this the effective -mod value if GOFLAGS already contains one.
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-mod=readonly"
 
 OUTPUT="Libtailscale.xcframework"
 
@@ -54,8 +57,8 @@ WIREGUARD_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Pa
 WIREGUARD_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/LiuTangLei/wireguard-go)"
 
 if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
-      "$TAILSCALE_VERSION" != "v1.102.3-0.20260806045550-6c744f881c4e" ]]; then
-    echo "error: expected github.com/LiuTangLei/tailscale v1.102.3-0.20260806045550-6c744f881c4e, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+      "$TAILSCALE_VERSION" != "v1.102.3-0.20260806105338-254cbfd5de28" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.102.3-0.20260806105338-254cbfd5de28, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
     exit 1
 fi
 if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||

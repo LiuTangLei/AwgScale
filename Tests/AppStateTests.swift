@@ -2,6 +2,39 @@ import Foundation
 import XCTest
 @testable import AwgScale
 
+private actor LocalPrefsResponseGate {
+    private var nextRequestID = 0
+    private var responses: [Int: CheckedContinuation<IPCResponse, Never>] = [:]
+    private var requestWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func response() async -> IPCResponse {
+        let requestID = nextRequestID
+        nextRequestID += 1
+
+        let readyWaiters = requestWaiters.filter { nextRequestID >= $0.count }
+        requestWaiters.removeAll { nextRequestID >= $0.count }
+        readyWaiters.forEach { $0.continuation.resume() }
+
+        return await withCheckedContinuation { continuation in
+            responses[requestID] = continuation
+        }
+    }
+
+    func waitForRequestCount(_ count: Int) async {
+        guard nextRequestID < count else { return }
+        await withCheckedContinuation { continuation in
+            requestWaiters.append((count, continuation))
+        }
+    }
+
+    func resume(requestID: Int, jc: Int) {
+        let body = Data(#"{"AmneziaWG":{"JC":\#(jc)}}"#.utf8)
+        responses.removeValue(forKey: requestID)?.resume(
+            returning: .success(statusCode: 200, body: body)
+        )
+    }
+}
+
 @MainActor
 final class AppStateTests: XCTestCase {
 
@@ -448,6 +481,318 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(state.peers.isEmpty)
     }
 
+    func testLocalAWGLookupFailurePreservesLastKnownGoodConfig() async {
+        enum LookupFailure: Error { case unavailable }
+
+        let state = AppState(vpnPermissionCapability: false)
+        state.currentAwgConfig = AmneziaWGPrefs(JC: 3, S1: 10)
+        state.localAwgStatus = true
+        let failingClient = LocalAPIClient { _, _, _, _, _ in
+            throw LookupFailure.unavailable
+        }
+
+        let loaded = await state.loadLocalAwgStatusOnce(
+            showMessages: false,
+            clientOverride: failingClient
+        )
+
+        XCTAssertFalse(loaded)
+        XCTAssertTrue(state.localAwgStatus)
+        XCTAssertEqual(state.currentAwgConfig?.JC, 3)
+        XCTAssertEqual(state.currentAwgConfig?.S1, 10)
+    }
+
+    func testOlderStandaloneAWGReadCannotOverwriteNewerResult() async {
+        let state = AppState(vpnPermissionCapability: false)
+        let gate = LocalPrefsResponseGate()
+        let client = LocalAPIClient { _, _, _, _, _ in
+            await gate.response()
+        }
+
+        let olderRead = Task {
+            await state.loadLocalAwgStatusOnce(
+                showMessages: false,
+                clientOverride: client
+            )
+        }
+        await gate.waitForRequestCount(1)
+
+        let newerRead = Task {
+            await state.loadLocalAwgStatusOnce(
+                showMessages: false,
+                clientOverride: client
+            )
+        }
+        await gate.waitForRequestCount(2)
+
+        await gate.resume(requestID: 1, jc: 7)
+        let newerLoaded = await newerRead.value
+        XCTAssertTrue(newerLoaded)
+        XCTAssertEqual(state.currentAwgConfig?.JC, 7)
+
+        await gate.resume(requestID: 0, jc: 3)
+        let olderLoaded = await olderRead.value
+        XCTAssertFalse(olderLoaded)
+        XCTAssertEqual(state.currentAwgConfig?.JC, 7)
+    }
+
+    func testProfileMutationInvalidatesDelayedAWGReadAndClearsOldSnapshot() async {
+        let state = AppState(vpnPermissionCapability: false)
+        let gate = LocalPrefsResponseGate()
+        let client = LocalAPIClient { _, _, _, _, _ in
+            await gate.response()
+        }
+        let oldPeerResult = AwgPeerResult(
+            nodeKey: "nodekey:" + String(repeating: "1", count: 64),
+            hostname: "old-profile-peer",
+            config: .init(JC: 3),
+            error: nil
+        )
+        state.currentAwgConfig = .init(JC: 3)
+        state.localAwgStatus = true
+        state.awgPeersData["old-profile-peer"] = oldPeerResult
+        state.awgPeersStatus["old-profile-peer"] = true
+        state.isAwgStatusRefreshing = true
+
+        let delayedOldProfileRead = Task {
+            await state.loadLocalAwgStatusOnce(
+                showMessages: false,
+                clientOverride: client
+            )
+        }
+        await gate.waitForRequestCount(1)
+
+        state.prepareAwgStateForProfileMutation()
+
+        XCTAssertFalse(state.isAwgStatusRefreshing)
+        XCTAssertFalse(state.localAwgStatus)
+        XCTAssertNil(state.currentAwgConfig)
+        XCTAssertTrue(state.awgPeersData.isEmpty)
+        XCTAssertTrue(state.awgPeersStatus.isEmpty)
+
+        await gate.resume(requestID: 0, jc: 9)
+        let loaded = await delayedOldProfileRead.value
+        XCTAssertFalse(loaded)
+        XCTAssertNil(state.currentAwgConfig)
+        XCTAssertFalse(state.localAwgStatus)
+    }
+
+    func testAWGCacheRejectsReusedHostnameFromDifferentNodeKey() {
+        let state = AppState(vpnPermissionCapability: false)
+        let newPeer = PeerNode(
+            from: .init(
+                ID: 2,
+                StableID: "new-peer",
+                Key: "nodekey:new-key",
+                Name: "server.",
+                ComputedName: nil,
+                Hostinfo: .init(Hostname: "server"),
+                Addresses: ["100.64.0.2/32"],
+                Online: true,
+                OS: "linux",
+                UserID: nil,
+                KeyExpiry: nil,
+                IsExitNode: nil,
+                AllowedIPs: nil
+            ),
+            isSelf: false,
+            userProfile: nil
+        )
+        state.peers = [newPeer]
+        let stale = AwgPeerResult(
+            nodeKey: "nodekey:old-key",
+            hostname: "server",
+            config: .init(JC: 3),
+            error: nil
+        )
+        state.awgPeersData["server"] = stale
+        state.awgPeersStatus["server"] = true
+
+        XCTAssertFalse(state.peerHasAwgConfig(newPeer))
+
+        state.pruneAwgPeerCache(to: ["new-key"])
+        XCTAssertTrue(state.awgPeersData.isEmpty)
+        XCTAssertTrue(state.awgPeersStatus.isEmpty)
+    }
+
+    func testAWGSyncDoesNotGuessBetweenDuplicateHostnames() {
+        func makePeer(stableID: String, nodeKey: String?) -> PeerNode {
+            PeerNode(
+                from: .init(
+                    ID: 2,
+                    StableID: stableID,
+                    Key: nodeKey,
+                    Name: "server.",
+                    ComputedName: nil,
+                    Hostinfo: .init(Hostname: "server"),
+                    Addresses: ["100.64.0.2/32"],
+                    Online: true,
+                    OS: "linux",
+                    UserID: nil,
+                    KeyExpiry: nil,
+                    IsExitNode: nil,
+                    AllowedIPs: nil
+                ),
+                isSelf: false,
+                userProfile: nil
+            )
+        }
+
+        let state = AppState(vpnPermissionCapability: false)
+        let firstKey = "nodekey:" + String(repeating: "1", count: 64)
+        let secondKey = "nodekey:" + String(repeating: "2", count: 64)
+        let target = makePeer(stableID: "target", nodeKey: nil)
+        state.peers = [
+            target,
+            makePeer(stableID: "duplicate-1", nodeKey: firstKey),
+            makePeer(stableID: "duplicate-2", nodeKey: secondKey),
+        ]
+
+        XCTAssertNil(state.fullNodeKeyForAwgSync(peer: target, peerData: nil))
+
+        let discovered = AwgPeerResult(
+            nodeKey: secondKey,
+            hostname: "server",
+            config: .init(JC: 3),
+            error: nil
+        )
+        state.awgPeersData["server"] = discovered
+        XCTAssertFalse(state.peerHasAwgConfig(target))
+        XCTAssertEqual(
+            state.fullNodeKeyForAwgSync(peer: target, peerData: discovered),
+            nil
+        )
+
+        state.peers = [target]
+        XCTAssertEqual(
+            state.fullNodeKeyForAwgSync(peer: target, peerData: discovered),
+            secondKey
+        )
+
+        let selectedRawKey = String(repeating: "a", count: 64)
+        let rawTarget = makePeer(stableID: "raw-target", nodeKey: selectedRawKey)
+        state.peers = [
+            rawTarget,
+            makePeer(stableID: "duplicate-1", nodeKey: firstKey),
+        ]
+        let matchingDiscovery = AwgPeerResult(
+            nodeKey: "nodekey:\(selectedRawKey)",
+            hostname: "server",
+            config: .init(JC: 3),
+            error: nil
+        )
+        XCTAssertEqual(
+            state.fullNodeKeyForAwgSync(peer: rawTarget, peerData: matchingDiscovery),
+            "nodekey:\(selectedRawKey)"
+        )
+        XCTAssertNil(
+            state.fullNodeKeyForAwgSync(peer: rawTarget, peerData: discovered)
+        )
+    }
+
+    func testAWGRefreshFingerprintTracksNodeKeyAndReachability() {
+        func makePeer(nodeKey: String, online: Bool) -> PeerNode {
+            PeerNode(
+                from: .init(
+                    ID: 2,
+                    StableID: "same-stable-id",
+                    Key: nodeKey,
+                    Name: "server.",
+                    ComputedName: nil,
+                    Hostinfo: .init(Hostname: "server"),
+                    Addresses: ["100.64.0.2/32"],
+                    Online: online,
+                    OS: "linux",
+                    UserID: nil,
+                    KeyExpiry: nil,
+                    IsExitNode: nil,
+                    AllowedIPs: nil
+                ),
+                isSelf: false,
+                userProfile: nil
+            )
+        }
+
+        let state = AppState(vpnPermissionCapability: false)
+        state.peers = [makePeer(nodeKey: "nodekey:first", online: false)]
+        let initial = state.awgPeerRefreshFingerprint()
+
+        state.peers = [makePeer(nodeKey: "nodekey:second", online: false)]
+        let rotatedKey = state.awgPeerRefreshFingerprint()
+        XCTAssertNotEqual(initial, rotatedKey)
+
+        state.peers = [makePeer(nodeKey: "nodekey:second", online: true)]
+        let reachable = state.awgPeerRefreshFingerprint()
+        XCTAssertNotEqual(rotatedKey, reachable)
+
+        XCTAssertFalse(
+            awgRefreshNeedsFollowUp(
+                force: false,
+                activePeerFingerprint: reachable,
+                currentPeerFingerprint: reachable
+            )
+        )
+        XCTAssertTrue(
+            awgRefreshNeedsFollowUp(
+                force: false,
+                activePeerFingerprint: rotatedKey,
+                currentPeerFingerprint: reachable
+            )
+        )
+        XCTAssertTrue(
+            awgRefreshNeedsFollowUp(
+                force: true,
+                activePeerFingerprint: reachable,
+                currentPeerFingerprint: reachable
+            )
+        )
+
+        state.isAwgStatusRefreshing = true
+        XCTAssertTrue(state.isAnyAwgOperationInProgress)
+    }
+
+    func testAWGOperationCoordinatorQueuesOnceAndRejectsStaleCompletion() {
+        var coordinator = AwgOperationCoordinator()
+
+        let first = coordinator.begin()
+        coordinator.queueRefresh()
+        XCTAssertEqual(coordinator.finish(first), true)
+        XCTAssertFalse(coordinator.hasPendingRefresh)
+        XCTAssertFalse(coordinator.isCurrent(first))
+
+        let stale = coordinator.begin()
+        coordinator.queueRefresh()
+        coordinator.invalidate()
+        XCTAssertNil(coordinator.finish(stale))
+        XCTAssertFalse(coordinator.hasPendingRefresh)
+
+        let current = coordinator.begin()
+        XCTAssertEqual(coordinator.finish(current), false)
+    }
+
+    func testAWGOperationStartPolicyRejectsBackendTransitions() {
+        XCTAssertNil(
+            awgOperationStartBlockReason(
+                isAnyAwgOperationInProgress: false,
+                isBackendTransitionInProgress: false
+            )
+        )
+        XCTAssertEqual(
+            awgOperationStartBlockReason(
+                isAnyAwgOperationInProgress: false,
+                isBackendTransitionInProgress: true
+            ),
+            "Network backend is busy"
+        )
+        XCTAssertEqual(
+            awgOperationStartBlockReason(
+                isAnyAwgOperationInProgress: true,
+                isBackendTransitionInProgress: true
+            ),
+            "Another AWG operation is already in progress"
+        )
+    }
+
     func testStartLoginDoesNotClearVisibleSession() {
         let state = AppState()
         state.ipnState = .running
@@ -481,6 +826,9 @@ final class AppStateTests: XCTestCase {
         let state = AppState()
         state.ipnState = .running
         state.peers = [PeerNode(from: .init(ID: 1, StableID: "x", Key: nil, Name: "test.", ComputedName: nil, Hostinfo: nil, Addresses: [], Online: true, OS: nil, UserID: nil, KeyExpiry: nil, IsExitNode: nil, AllowedIPs: nil), isSelf: false, userProfile: nil)]
+        state.currentAwgConfig = .init(JC: 3)
+        state.localAwgStatus = true
+        state.awgPeersStatus["test"] = true
 
         state.logout()
 
@@ -488,6 +836,9 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.peers.isEmpty)
         XCTAssertNil(state.selfNode)
         XCTAssertNil(state.currentProfile)
+        XCTAssertNil(state.currentAwgConfig)
+        XCTAssertFalse(state.localAwgStatus)
+        XCTAssertTrue(state.awgPeersStatus.isEmpty)
     }
 
     func testHandleNotifyInvalidJSON() {

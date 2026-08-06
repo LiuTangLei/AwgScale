@@ -21,14 +21,10 @@ func (app *App) refreshUsableDERPMapForLocalAPI(endpoint string) {
 	if b == nil || b.backend == nil || b.sys == nil {
 		return
 	}
-	dm := b.backend.DERPMap()
-	app.installDERPMapSourceOnce(dm, func() bool {
-		sanitized, changed := sanitizeDERPMapForIOS(dm, b.backend.Prefs().ControlURL())
-		if !changed {
-			return false
-		}
+	app.ensureCurrentUsableDERPMap(func() (*tailcfg.DERPMap, string) {
+		return b.backend.DERPMap(), b.backend.Prefs().ControlURL()
+	}, func(sanitized *tailcfg.DERPMap) bool {
 		if mc := b.sys.MagicSock.Get(); mc != nil {
-			log.Printf("derpmap: installed iOS DERP address fallbacks before LocalAPI %s", endpoint)
 			mc.SetDERPMap(sanitized)
 			return true
 		}
@@ -36,28 +32,64 @@ func (app *App) refreshUsableDERPMapForLocalAPI(endpoint string) {
 	})
 }
 
-// installDERPMapSourceOnce runs install at most once for a particular DERPMap
-// snapshot. LocalBackend keeps the same pointer until control supplies a new
-// network map. Reinstalling a sanitized clone for every LocalAPI call or peer
-// delta makes magicsock treat its regions as redefined, which tears down active
-// DERP connections and can lose in-flight disco responses such as AWG sync.
+// ensureCurrentUsableDERPMap evaluates each DERPMap/control URL pair once, then
+// ensures the cached sanitized map is installed whenever a caller reaches this
+// point. Keeping evaluation separate from installation has three important
+// properties:
+//   - a map that needs no changes is remembered instead of repeating DNS work;
+//   - a failed install can be retried without repeating DNS work; and
+//   - a prefs edit that makes LocalBackend restore its original map can be
+//     followed by another ensure call to restore the sanitized clone.
 //
-// A failed install is deliberately not remembered, so a later LocalAPI call
-// can retry after MagicSock or DNS becomes ready.
-func (app *App) installDERPMapSourceOnce(source *tailcfg.DERPMap, install func() bool) bool {
-	if source == nil {
-		return false
-	}
+// magicsock's SetDERPMap is content-idempotent, so reinstalling an unchanged
+// sanitized map is a cheap no-op and does not reconnect DERP.
+//
+// Reading the current source and installing its sanitized form are serialized.
+// The source is checked again after installation so an older evaluation cannot
+// overwrite a newer map when control updates the netmap concurrently.
+func (app *App) ensureCurrentUsableDERPMap(current func() (*tailcfg.DERPMap, string), install func(*tailcfg.DERPMap) bool) bool {
 	app.derpMapMu.Lock()
 	defer app.derpMapMu.Unlock()
-	if app.installedDERPMap == source {
-		return false
+
+	// Netmap churn is normally one update at a time. Bound the loop so a control
+	// plane continuously replacing maps cannot monopolize a LocalAPI request; a
+	// later notification/request will retry the latest source.
+	for range 4 {
+		source, controlURL := current()
+		if source == nil {
+			return false
+		}
+		sanitized, changed := app.evaluateDERPMapSourceLocked(source, controlURL)
+		installed := true
+		if changed {
+			installed = install(sanitized)
+		}
+
+		latestSource, latestControlURL := current()
+		if latestSource == source && latestControlURL == controlURL {
+			return installed
+		}
 	}
-	if !install() {
-		return false
+	return false
+}
+
+func (app *App) evaluateDERPMapSourceLocked(source *tailcfg.DERPMap, controlURL string) (*tailcfg.DERPMap, bool) {
+	if app.derpMapEvaluationReady &&
+		app.evaluatedDERPMap == source &&
+		app.evaluatedDERPControlURL == controlURL {
+		return app.evaluatedSanitizedDERPMap, app.evaluatedSanitizedDERPMap != nil
 	}
-	app.installedDERPMap = source
-	return true
+
+	sanitized, changed := sanitizeDERPMapForIOS(source, controlURL)
+	app.evaluatedDERPMap = source
+	app.evaluatedDERPControlURL = controlURL
+	app.derpMapEvaluationReady = true
+	if changed {
+		app.evaluatedSanitizedDERPMap = sanitized
+	} else {
+		app.evaluatedSanitizedDERPMap = nil
+	}
+	return sanitized, changed
 }
 
 func sanitizeDERPMapForIOS(dm *tailcfg.DERPMap, controlURL string) (*tailcfg.DERPMap, bool) {
@@ -75,11 +107,23 @@ func sanitizeDERPMapForIOS(dm *tailcfg.DERPMap, controlURL string) (*tailcfg.DER
 				continue
 			}
 			addr, hasLoopbackIPv4 := derpLoopbackIPv4(node.IPv4)
-			resolved, resolvedLoopback := derpHostnameResolvesToLoopback(node.HostName)
 			hasSingleLabelHost := !strings.Contains(node.HostName, ".")
 			shouldPinCustomHost := shouldPinCustomDERPIPv4(node.HostName, controlURL)
-			if !hasLoopbackIPv4 && !resolvedLoopback && !hasSingleLabelHost && !shouldPinCustomHost {
-				continue
+			var resolved netip.Addr
+			var resolvedLoopback bool
+			if !hasLoopbackIPv4 && !hasSingleLabelHost && !shouldPinCustomHost {
+				// Official DERP hostnames already have a usable control-provided
+				// definition. Resolving every official hostname here adds no useful
+				// fallback and can serialize one DNS timeout per node on every API
+				// request when the resolver is unhealthy.
+				normalizedHost := strings.Trim(strings.ToLower(node.HostName), ".")
+				if isOfficialTailscaleDERPHost(normalizedHost) {
+					continue
+				}
+				resolved, resolvedLoopback = derpHostnameResolvesToLoopback(node.HostName)
+				if !resolvedLoopback {
+					continue
+				}
 			}
 
 			fallback, fallbackName, fallbackHostName := resolveDERPFallbackIPv4(node.HostName, controlURL)

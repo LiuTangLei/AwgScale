@@ -53,23 +53,26 @@ type App struct {
 	policyStore       *syspolicyStore
 	logIDPublicAtomic atomic.Pointer[logid.PublicID]
 
-	localAPIHandler    http.Handler
-	backend            *ipnlocal.LocalBackend
-	backendState       *backend // prevent GC; logIDPublicAtomic points into this
-	ready              chan struct{}
-	readyOnce          sync.Once
-	readyErr           error
-	packetCallback     PacketCallback
-	tunnelConfigMgr    tunnelConfigManager
-	sshMu              sync.Mutex
-	sshSessions        map[string]*inAppSSHSession
-	derpMapMu          sync.Mutex
-	installedDERPMap   *tailcfg.DERPMap
-	inAppProxyMu       sync.Mutex
-	inAppProxyListener net.Listener
-	inAppProxyBackend  *backend
-	inAppProxyHost     string
-	inAppProxyPort     int
+	localAPIHandler           http.Handler
+	backend                   *ipnlocal.LocalBackend
+	backendState              *backend // prevent GC; logIDPublicAtomic points into this
+	ready                     chan struct{}
+	readyOnce                 sync.Once
+	readyErr                  error
+	packetCallback            PacketCallback
+	tunnelConfigMgr           tunnelConfigManager
+	sshMu                     sync.Mutex
+	sshSessions               map[string]*inAppSSHSession
+	derpMapMu                 sync.Mutex
+	evaluatedDERPMap          *tailcfg.DERPMap
+	evaluatedDERPControlURL   string
+	evaluatedSanitizedDERPMap *tailcfg.DERPMap
+	derpMapEvaluationReady    bool
+	inAppProxyMu              sync.Mutex
+	inAppProxyListener        net.Listener
+	inAppProxyBackend         *backend
+	inAppProxyHost            string
+	inAppProxyPort            int
 }
 
 type backend struct {

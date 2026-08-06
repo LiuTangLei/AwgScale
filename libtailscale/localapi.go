@@ -168,6 +168,13 @@ func (app *App) callLocalAPI(timeoutMillis int, method, endpoint string, header 
 			}
 		}()
 
+		// LocalBackend restores the control-provided DERP map during prefs
+		// edits. Re-run the cached, content-idempotent ensure after every
+		// handler so PATCH prefs, start, AWG apply, and future prefs-mutating
+		// endpoints cannot silently discard the iOS fallback map. Register it
+		// before Close so the response reaches the caller first; a fresh custom
+		// map might otherwise hold EOF behind one or more DNS lookups.
+		defer app.refreshUsableDERPMapForLocalAPI(endpoint + "-complete")
 		defer pipeWriter.Close()
 		app.localAPIHandler.ServeHTTP(resp, req)
 		resp.Flush()

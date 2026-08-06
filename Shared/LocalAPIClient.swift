@@ -277,6 +277,9 @@ struct LocalAPIClient {
 
     func awgPeers() async throws -> [AwgPeerResult] {
         let endpoint = "/localapi/v0/awg-sync-peers"
+        // Core bounds the whole concurrent discovery batch to about 14s and
+        // returns per-peer errors. Keep enough transport margin for DERP and
+        // IPC scheduling without turning one unavailable peer into a long UI wait.
         let resp = try await execute("GET", endpoint, nil, 30000, true)
         return try resp.decodedBody([AwgPeerResult].self, endpoint: endpoint)
     }

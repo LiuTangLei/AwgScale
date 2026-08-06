@@ -96,6 +96,22 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(capturedMethod, "POST")
         XCTAssertEqual(capturedEndpoint, "/localapi/v0/bugreport")
     }
+
+    func testAWGPeerDiscoveryLeavesMarginForCoreBatchDeadline() async throws {
+        var capturedTimeout = 0
+        let client = LocalAPIClient { method, endpoint, _, timeout, _ in
+            XCTAssertEqual(method, "GET")
+            XCTAssertEqual(endpoint, "/localapi/v0/awg-sync-peers")
+            capturedTimeout = timeout
+            return IPCResponse.success(statusCode: 200, body: Data("[]".utf8))
+        }
+
+        let peers = try await client.awgPeers()
+
+        XCTAssertTrue(peers.isEmpty)
+        XCTAssertEqual(capturedTimeout, 30_000)
+        XCTAssertGreaterThan(capturedTimeout, 14_000)
+    }
 }
 
 final class TaildropFileSafetyTests: XCTestCase {

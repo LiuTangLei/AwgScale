@@ -53,6 +53,15 @@ plist_value() {
 write_entitlements() {
     local output_path="$1"
     local bundle_id="$2"
+    local includes_packet_tunnel="${3:-false}"
+    local packet_tunnel_entitlement=""
+
+    if [[ "$includes_packet_tunnel" == "true" ]]; then
+        packet_tunnel_entitlement='    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>'
+    fi
 
     cat >"$output_path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -71,10 +80,7 @@ write_entitlements() {
     <array>
         <string>${TEAM_ID}.top.yesican.awgscale.shared</string>
     </array>
-    <key>com.apple.developer.networking.networkextension</key>
-    <array>
-        <string>packet-tunnel-provider</string>
-    </array>
+${packet_tunnel_entitlement}
     <key>get-task-allow</key>
     <true/>
 </dict>
@@ -133,7 +139,7 @@ sign_for_trollstore() {
     local app_bundle_id
 
     app_bundle_id="$(plist_value "$app_path/Info.plist" CFBundleIdentifier)"
-    write_entitlements "$entitlements_dir/app.entitlements" "$app_bundle_id"
+    write_entitlements "$entitlements_dir/app.entitlements" "$app_bundle_id" true
 
     echo "==> Ad-hoc signing embedded frameworks"
     find "$app_path" -type d -name '*.framework' -print0 | while IFS= read -r -d '' framework_path; do
@@ -144,9 +150,15 @@ sign_for_trollstore() {
     find "$app_path/PlugIns" -maxdepth 1 -type d -name '*.appex' -print0 2>/dev/null | while IFS= read -r -d '' extension_path; do
         local extension_bundle_id
         local extension_entitlements
+        local extension_point_identifier
+        local includes_packet_tunnel=false
         extension_bundle_id="$(plist_value "$extension_path/Info.plist" CFBundleIdentifier)"
+        extension_point_identifier="$(plist_value "$extension_path/Info.plist" NSExtension.NSExtensionPointIdentifier)"
+        if [[ "$extension_point_identifier" == "com.apple.networkextension.packet-tunnel" ]]; then
+            includes_packet_tunnel=true
+        fi
         extension_entitlements="$entitlements_dir/$(basename "$extension_path").entitlements"
-        write_entitlements "$extension_entitlements" "$extension_bundle_id"
+        write_entitlements "$extension_entitlements" "$extension_bundle_id" "$includes_packet_tunnel"
         ad_hoc_sign_bundle "$extension_path" "$extension_entitlements"
     done
 

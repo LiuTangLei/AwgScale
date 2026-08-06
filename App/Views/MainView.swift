@@ -29,8 +29,10 @@ struct MainView: View {
     }
 
     private var awgScanTaskID: String {
-        let peerIDs = visiblePeers.map(\.id).joined(separator: ",")
-        return "\(appState.usesVPNPermission)-\(vpnIsActive)-\(appState.ipnState.rawValue)-\(peerIDs)"
+        let peerFingerprint = visiblePeers.map { peer in
+            "\(peer.id):\(peer.nodeKey ?? ""):\(peer.online)"
+        }.joined(separator: ",")
+        return "\(appState.usesVPNPermission)-\(vpnIsActive)-\(appState.ipnState.rawValue)-\(peerFingerprint)"
     }
 
     private var connectionTitle: String {
@@ -325,7 +327,7 @@ struct PeerRow: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
-                  .disabled(isSyncing || !peer.online)
+                .disabled(appState.isAnyAwgOperationInProgress || !peer.online)
             }
 
             if let os = peer.os, !os.isEmpty {

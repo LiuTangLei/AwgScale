@@ -190,6 +190,61 @@ private extension IpnState {
 
 }
 
+func awgRefreshNeedsFollowUp(
+    force: Bool,
+    activePeerFingerprint: Set<String>,
+    currentPeerFingerprint: Set<String>
+) -> Bool {
+    force || activePeerFingerprint != currentPeerFingerprint
+}
+
+func awgOperationStartBlockReason(
+    isAnyAwgOperationInProgress: Bool,
+    isBackendTransitionInProgress: Bool
+) -> String? {
+    if isAnyAwgOperationInProgress {
+        return "Another AWG operation is already in progress"
+    }
+    if isBackendTransitionInProgress {
+        return "Network backend is busy"
+    }
+    return nil
+}
+
+struct AwgOperationCoordinator {
+    private(set) var generation: UInt64 = 0
+    private(set) var hasPendingRefresh = false
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+        hasPendingRefresh = false
+    }
+
+    mutating func queueRefresh() {
+        hasPendingRefresh = true
+    }
+
+    func isCurrent(_ candidate: UInt64) -> Bool {
+        candidate == generation
+    }
+
+    mutating func finish(_ candidate: UInt64) -> Bool? {
+        guard isCurrent(candidate) else { return nil }
+        let shouldRefresh = hasPendingRefresh
+        hasPendingRefresh = false
+        // End the epoch as well as the busy state. Standalone prefs reads that
+        // began during this operation must not become valid merely because the
+        // operation completed before their older response arrived.
+        generation &+= 1
+        return shouldRefresh
+    }
+}
+
 /// App-wide state container driven by ipn.Notify events.
 ///
 /// In the dual-process architecture:
@@ -254,12 +309,21 @@ class AppState: ObservableObject {
     @Published var isAwgStatusRefreshing = false
     /// Hostname of peer currently being synced (nil if no sync in progress)
     @Published var awgSyncInProgress: String?
-    private var isAwgOperationInProgress = false
+    @Published private(set) var isAwgOperationInProgress = false
+    var isAnyAwgOperationInProgress: Bool {
+        isAwgOperationInProgress || isAwgStatusRefreshing
+    }
     /// Whether AWG peers have been loaded (prevent duplicate requests)
     private var awgPeersLoaded = false
     private var awgPeersLoading = false
+    private var awgRefreshPending = false
+    private var awgActiveRefreshPeerFingerprint: Set<String> = []
+    private var awgRefreshTask: Task<Void, Never>?
+    private var awgRefreshGeneration: UInt64 = 0
+    private var awgOperationCoordinator = AwgOperationCoordinator()
+    private var localAwgReadGeneration: UInt64 = 0
     private var awgLastRefresh: Date?
-    private var awgLastRefreshPeerIDs: Set<String> = []
+    private var awgLastRefreshPeerFingerprint: Set<String> = []
     private let awgRefreshInterval: TimeInterval = 30
     private var notificationSyncTask: Task<Void, Never>?
     private var notificationSyncGeneration: UInt64 = 0
@@ -361,6 +425,10 @@ class AppState: ObservableObject {
 
     func setUsesVPNPermission(_ enabled: Bool) {
         guard usesVPNPermission != enabled else { return }
+        guard !isAwgOperationInProgress else {
+            lastError = "Wait for the current AWG configuration change to finish."
+            return
+        }
         guard profileBackendLeaseCount == 0 else {
             lastError = "Wait for profile management to finish before changing network mode."
             return
@@ -634,6 +702,9 @@ class AppState: ObservableObject {
     }
 
     private func clearBackendSnapshotState() {
+        invalidateAwgRefresh()
+        awgOperationCoordinator.invalidate()
+        localAwgReadGeneration &+= 1
         currentProfile = nil
         prefs = nil
         selfNode = nil
@@ -647,9 +718,8 @@ class AppState: ObservableObject {
         awgSyncInProgress = nil
         isAwgOperationInProgress = false
         awgPeersLoaded = false
-        awgPeersLoading = false
         awgLastRefresh = nil
-        awgLastRefreshPeerIDs = []
+        awgLastRefreshPeerFingerprint = []
         isUpdatingExitNode = false
         pendingExitNodeID = nil
         pendingExitNodeAllowLANAccess = nil
@@ -1681,6 +1751,10 @@ class AppState: ObservableObject {
 
     /// Log out and clear all state.
     func logout() {
+        guard !isAwgOperationInProgress else {
+            lastError = "Wait for the current AWG configuration change to finish before logging out."
+            return
+        }
         guard profileBackendLeaseCount == 0 else {
             lastError = "Wait for profile management to finish before logging out."
             return
@@ -1710,6 +1784,10 @@ class AppState: ObservableObject {
 
     /// Toggle VPN on/off via prefs edit.
     func setWantRunning(_ wantRunning: Bool) {
+        guard !isAwgOperationInProgress else {
+            lastError = "Wait for the current AWG configuration change to finish."
+            return
+        }
         guard profileBackendLeaseCount == 0 else {
             lastError = "Wait for profile management to finish before changing the connection."
             return
@@ -1970,9 +2048,10 @@ class AppState: ObservableObject {
     private struct ProfileClientLease {
         let client: LocalAPIClient
         let usesLoginBackend: Bool
+        let mutatesProfiles: Bool
     }
 
-    private func acquireProfileClient() async throws -> ProfileClientLease {
+    private func acquireProfileClient(mutatingProfiles: Bool = false) async throws -> ProfileClientLease {
         guard !isBackendTransitionInProgress else {
             throw LoginFlowError.localAPI("Network backend is busy")
         }
@@ -1984,6 +2063,9 @@ class AppState: ObservableObject {
         }
 
         profileBackendLeaseCount += 1
+        if mutatingProfiles {
+            prepareAwgStateForProfileMutation()
+        }
         if usesVPNPermission, let vpn = vpnManager {
             var vpnStatus = vpn.updateStatusFromConnection()
             if vpnStatus == .invalid {
@@ -1994,9 +2076,16 @@ class AppState: ObservableObject {
             }
             switch vpnStatus {
             case .connected, .reasserting:
-                return ProfileClientLease(client: .vpn(vpn), usesLoginBackend: false)
+                return ProfileClientLease(
+                    client: .vpn(vpn),
+                    usesLoginBackend: false,
+                    mutatesProfiles: mutatingProfiles
+                )
             case .connecting, .disconnecting:
                 profileBackendLeaseCount = max(0, profileBackendLeaseCount - 1)
+                if mutatingProfiles {
+                    scheduleAwgRefreshAfterProfileMutation()
+                }
                 throw LoginFlowError.localAPI("Wait for the VPN transition to finish")
             default:
                 break
@@ -2035,10 +2124,17 @@ class AppState: ObservableObject {
                 profileStartedTemporaryBackend = false
                 loginBackend.stop()
             }
+            if mutatingProfiles {
+                scheduleAwgRefreshAfterProfileMutation()
+            }
             throw error
         }
 
-        return ProfileClientLease(client: .login(loginBackend), usesLoginBackend: true)
+        return ProfileClientLease(
+            client: .login(loginBackend),
+            usesLoginBackend: true,
+            mutatesProfiles: mutatingProfiles
+        )
     }
 
     private func releaseProfileClient(_ lease: ProfileClientLease) {
@@ -2048,6 +2144,9 @@ class AppState: ObservableObject {
            profileStartedTemporaryBackend {
             profileStartedTemporaryBackend = false
             loginBackend.stop()
+        }
+        if lease.mutatesProfiles {
+            scheduleAwgRefreshAfterProfileMutation()
         }
     }
 
@@ -2076,7 +2175,7 @@ class AppState: ObservableObject {
     }
 
     func switchProfileForManagement(id: String) async throws -> [LoginProfile] {
-        let lease = try await acquireProfileClient()
+        let lease = try await acquireProfileClient(mutatingProfiles: true)
         defer { releaseProfileClient(lease) }
 
         try await lease.client.switchProfile(id: id)
@@ -2085,7 +2184,7 @@ class AppState: ObservableObject {
     }
 
     func deleteProfileForManagement(id: String) async throws -> [LoginProfile] {
-        let lease = try await acquireProfileClient()
+        let lease = try await acquireProfileClient(mutatingProfiles: true)
         defer { releaseProfileClient(lease) }
 
         try await lease.client.deleteProfile(id: id)
@@ -2093,7 +2192,7 @@ class AppState: ObservableObject {
     }
 
     func addProfileForManagement(authKey: String, controlURL: String) async throws {
-        let lease = try await acquireProfileClient()
+        let lease = try await acquireProfileClient(mutatingProfiles: true)
         defer { releaseProfileClient(lease) }
 
         let previousProfileID = currentProfile?.ID
@@ -2160,6 +2259,29 @@ class AppState: ObservableObject {
     }
 
     func refreshAwgStatus(showMessages: Bool = true, force: Bool = true) {
+        if awgPeersLoading {
+            let currentPeerFingerprint = awgPeerRefreshFingerprint()
+            if awgRefreshNeedsFollowUp(
+                force: force,
+                activePeerFingerprint: awgActiveRefreshPeerFingerprint,
+                currentPeerFingerprint: currentPeerFingerprint
+            ) {
+                // Sticky until completion: this also covers A→B→A peer churn
+                // and a forced refresh requested by a newer tunnel/backend.
+                awgRefreshPending = true
+            }
+            if showMessages { awgStatusMessage = "AWG status refresh already in progress" }
+            return
+        }
+        if isAwgOperationInProgress {
+            // Applying a config can emit tunnel/netmap refresh requests while
+            // prefs and the backend are still restarting. Run exactly one
+            // fresh discovery after the operation instead of dropping it or
+            // querying a backend that is about to be replaced.
+            awgOperationCoordinator.queueRefresh()
+            if showMessages { awgStatusMessage = "AWG status refresh queued" }
+            return
+        }
         guard !peers.isEmpty else {
             if showMessages { awgStatusMessage = "No peers available to check" }
             return
@@ -2176,42 +2298,132 @@ class AppState: ObservableObject {
             if showMessages { awgStatusMessage = "Connect app network to refresh AWG status" }
             return
         }
-        let currentPeerIDs = Set(peers.map(\.id))
-        if !force, awgPeersLoaded, awgLastRefreshPeerIDs == currentPeerIDs, let awgLastRefresh,
+        let currentPeerFingerprint = awgPeerRefreshFingerprint()
+        if !force, awgPeersLoaded, awgLastRefreshPeerFingerprint == currentPeerFingerprint, let awgLastRefresh,
            Date().timeIntervalSince(awgLastRefresh) < awgRefreshInterval {
             if showMessages { awgStatusMessage = "AWG status is already up to date" }
             return
         }
-        guard !awgPeersLoading else {
-            if showMessages { awgStatusMessage = "AWG status refresh already in progress" }
-            return
-        }
-
         awgPeersLoading = true
+        awgActiveRefreshPeerFingerprint = currentPeerFingerprint
         isAwgStatusRefreshing = true
         if showMessages { awgStatusMessage = "Refreshing AWG status..." }
-        Task {
-            defer {
-                awgPeersLoading = false
-                isAwgStatusRefreshing = false
-            }
-            let loadedPeers = await loadAwgPeersStatusOnce(showMessages: showMessages)
-            _ = await loadLocalAwgStatusOnce(showMessages: showMessages)
-            if loadedPeers {
-                awgPeersLoaded = true
-                awgLastRefresh = Date()
-                awgLastRefreshPeerIDs = currentPeerIDs
-            }
+        awgRefreshGeneration &+= 1
+        let generation = awgRefreshGeneration
+        awgRefreshTask = Task { [weak self] in
+            await self?.performAwgRefresh(
+                generation: generation,
+                startingPeerFingerprint: currentPeerFingerprint,
+                showMessages: showMessages
+            )
         }
     }
 
-    private func loadAwgPeersStatusOnce(showMessages: Bool) async -> Bool {
+    private func performAwgRefresh(
+        generation: UInt64,
+        startingPeerFingerprint: Set<String>,
+        showMessages: Bool
+    ) async {
+        defer { finishAwgRefresh(generation: generation) }
+
+        let loadedPeers = await loadAwgPeersStatusOnce(
+            showMessages: showMessages,
+            generation: generation
+        )
+        guard isCurrentAwgRefresh(generation) else { return }
+        _ = await loadLocalAwgStatusOnce(
+            showMessages: showMessages,
+            refreshGeneration: generation
+        )
+        guard isCurrentAwgRefresh(generation) else { return }
+
+        let latestPeerFingerprint = awgPeerRefreshFingerprint()
+        if latestPeerFingerprint != startingPeerFingerprint {
+            awgRefreshPending = true
+        }
+        if loadedPeers {
+            awgPeersLoaded = true
+            awgLastRefresh = Date()
+            awgLastRefreshPeerFingerprint = startingPeerFingerprint
+        }
+    }
+
+    private func finishAwgRefresh(generation: UInt64) {
+        guard generation == awgRefreshGeneration else { return }
+        awgRefreshTask = nil
+        awgPeersLoading = false
+        awgActiveRefreshPeerFingerprint = []
+        isAwgStatusRefreshing = false
+
+        guard awgRefreshPending else { return }
+        awgRefreshPending = false
+        if peers.isEmpty {
+            awgPeersData = [:]
+            awgPeersStatus = [:]
+            awgPeersLoaded = false
+            awgLastRefresh = nil
+            awgLastRefreshPeerFingerprint = []
+        } else {
+            // Follow-up scans caused by peer churn stay silent so a background
+            // netmap update never creates another toast.
+            refreshAwgStatus(showMessages: false, force: true)
+        }
+    }
+
+    private func invalidateAwgRefresh() {
+        awgRefreshGeneration &+= 1
+        awgRefreshTask?.cancel()
+        awgRefreshTask = nil
+        awgPeersLoading = false
+        awgRefreshPending = false
+        awgActiveRefreshPeerFingerprint = []
+        isAwgStatusRefreshing = false
+    }
+
+    func prepareAwgStateForProfileMutation() {
+        // A profile mutation changes the identity/netmap behind LocalAPI. Stop
+        // both in-flight discovery and standalone prefs reads before sending
+        // switch/delete/new/login so Profile A can never repopulate Profile B.
+        invalidateAwgRefresh()
+        localAwgReadGeneration &+= 1
+        awgPeersStatus = [:]
+        awgPeersData = [:]
+        localAwgStatus = false
+        currentAwgConfig = nil
+        awgStatusMessage = nil
+        awgPeersLoaded = false
+        awgLastRefresh = nil
+        awgLastRefreshPeerFingerprint = []
+    }
+
+    private func scheduleAwgRefreshAfterProfileMutation() {
+        guard profileBackendLeaseCount == 0 else { return }
+        if peers.isEmpty {
+            Task { [weak self] in
+                await self?.loadLocalAwgStatusOnce(showMessages: false)
+            }
+        } else {
+            refreshAwgStatus(showMessages: false, force: true)
+        }
+    }
+
+    private func isCurrentAwgRefresh(_ generation: UInt64) -> Bool {
+        generation == awgRefreshGeneration && !Task.isCancelled
+    }
+
+    private func loadAwgPeersStatusOnce(showMessages: Bool, generation: UInt64) async -> Bool {
         do {
             let awgPeers = try await activeLocalAPIClient().awgPeers()
+            guard isCurrentAwgRefresh(generation) else { return false }
+            let currentNodeKeys = Set(peers.compactMap { canonicalAwgNodeKey($0.nodeKey) })
+            let currentAwgPeers = awgPeers.filter {
+                guard let nodeKey = canonicalAwgNodeKey($0.nodeKey) else { return false }
+                return currentNodeKeys.contains(nodeKey)
+            }
 
             var dataMap: [String: AwgPeerResult] = [:]
 
-            for peer in awgPeers {
+            for peer in currentAwgPeers {
                 for key in awgKeyCandidates(peer.nodeKey) {
                     dataMap[key] = preferredAwgPeer(existing: dataMap[key], new: peer)
                 }
@@ -2220,13 +2432,14 @@ class AppState: ObservableObject {
                 }
             }
 
+            pruneAwgPeerCache(to: currentNodeKeys)
             mergeAwgPeerStatus(dataMap: dataMap)
 
             if showMessages {
-                let awgCount = awgPeers.filter(\.hasAwgConfig).count
-                let unavailableCount = awgPeers.filter { $0.lookupError != nil }.count
-                let determinedCount = awgPeers.count - unavailableCount
-                let total = awgPeers.count
+                let awgCount = currentAwgPeers.filter(\.hasAwgConfig).count
+                let unavailableCount = currentAwgPeers.filter { $0.lookupError != nil }.count
+                let determinedCount = currentAwgPeers.count - unavailableCount
+                let total = currentAwgPeers.count
                 if total > 0 {
                     if awgCount > 0 && unavailableCount > 0 {
                         awgStatusMessage = "Found \(awgCount)/\(determinedCount) reachable peers with AWG config; \(unavailableCount) temporarily unavailable"
@@ -2245,25 +2458,75 @@ class AppState: ObservableObject {
             }
             return true
         } catch {
-            if showMessages {
+            if showMessages, isCurrentAwgRefresh(generation) {
                 awgStatusMessage = "Failed to get AWG config info: \(error.localizedDescription)"
             }
             return false
         }
     }
 
-    private func loadLocalAwgStatusOnce(showMessages: Bool) async -> Bool {
+    func loadLocalAwgStatusOnce(
+        showMessages: Bool,
+        clientOverride: LocalAPIClient? = nil,
+        refreshGeneration: UInt64? = nil,
+        operationGeneration: UInt64? = nil
+    ) async -> Bool {
+        let operationGenerationAtStart = awgOperationCoordinator.generation
+        let standaloneReadGeneration: UInt64?
+        if refreshGeneration == nil, operationGeneration == nil {
+            localAwgReadGeneration &+= 1
+            standaloneReadGeneration = localAwgReadGeneration
+        } else {
+            standaloneReadGeneration = nil
+        }
         do {
-            let prefs = try await activeLocalAPIClient().localPrefs()
+            let client: LocalAPIClient
+            if let clientOverride {
+                client = clientOverride
+            } else {
+                client = try await activeLocalAPIClient()
+            }
+            let prefs = try await client.localPrefs()
+            if let refreshGeneration, !isCurrentAwgRefresh(refreshGeneration) {
+                return false
+            }
+            if let operationGeneration, !isCurrentAwgOperation(operationGeneration) {
+                return false
+            }
+            if let standaloneReadGeneration,
+               standaloneReadGeneration != localAwgReadGeneration {
+                // A newer Settings/copy read has already started. A delayed
+                // response from this request must not roll its result back.
+                return false
+            }
+            if operationGeneration == nil,
+               (isAwgOperationInProgress ||
+                !awgOperationCoordinator.isCurrent(operationGenerationAtStart)) {
+                // A standalone Settings/copy read that straddles an apply is
+                // stale even if it succeeds. Never let it overwrite the config
+                // confirmed by the newer operation.
+                return false
+            }
             currentAwgConfig = prefs.AmneziaWG
             localAwgStatus = currentAwgConfig?.hasNonDefaultValues == true
             return true
         } catch {
-            if !isBackendTransitionInProgress {
-                localAwgStatus = false
-                currentAwgConfig = nil
-            }
-            if showMessages {
+            // A transport/backend failure means "unknown", not standard
+            // WireGuard. Preserve the last confirmed config so a transient
+            // LocalAPI outage cannot clear the settings form or AWG star.
+            let refreshIsCurrent = refreshGeneration.map(isCurrentAwgRefresh) ?? true
+            let operationIsCurrent = operationGeneration.map(isCurrentAwgOperation) ?? true
+            let standaloneRequestIsCurrent = standaloneReadGeneration.map {
+                $0 == localAwgReadGeneration
+            } ?? true
+            let standaloneReadIsCurrent = operationGeneration != nil ||
+                (!isAwgOperationInProgress &&
+                 awgOperationCoordinator.isCurrent(operationGenerationAtStart))
+            if showMessages,
+               refreshIsCurrent,
+               operationIsCurrent,
+               standaloneRequestIsCurrent,
+               standaloneReadIsCurrent {
                 awgStatusMessage = "Failed to get local AWG status: \(error.localizedDescription)"
             }
             return false
@@ -2296,6 +2559,14 @@ class AppState: ObservableObject {
     func syncAwgConfigFromPeer(_ peer: PeerNode, timeout: Int = 30) {
         let hostname = peer.displayName
 
+        if let blockReason = awgOperationStartBlockReason(
+            isAnyAwgOperationInProgress: isAnyAwgOperationInProgress,
+            isBackendTransitionInProgress: isBackendTransitionInProgress
+        ) {
+            awgStatusMessage = blockReason
+            return
+        }
+
         // Verify peer has AWG config
         let peerData = awgData(for: peer)
 
@@ -2317,37 +2588,51 @@ class AppState: ObservableObject {
         }
 
         awgSyncInProgress = hostname
-        isAwgOperationInProgress = true
+        let operationGeneration = beginAwgOperation()
 
         Task {
             defer {
-                awgSyncInProgress = nil
-                isAwgOperationInProgress = false
+                if isCurrentAwgOperation(operationGeneration) {
+                    awgSyncInProgress = nil
+                    finishAwgOperation(operationGeneration)
+                }
             }
 
             do {
                 let (client, vpn) = try await ensureBackendReadyForAwgSync()
+                try requireCurrentAwgOperation(operationGeneration)
                 if usesVPNPermission {
                     awgStatusMessage = "Waiting for peer connectivity..."
                     if let peerReadinessError = await waitForPeerReachableForAwgSync(client, vpn: vpn, peer: peer) {
+                        try requireCurrentAwgOperation(operationGeneration)
                         throw LoginFlowError.localAPI(peerReadinessError)
                     }
+                    try requireCurrentAwgOperation(operationGeneration)
                 }
                 awgStatusMessage = "Syncing AWG config from \(hostname)..."
                 let request = AwgSyncApplyRequest(nodeKey: nodeKey, timeout: timeout)
                 let appliedConfig = try await client.awgSyncApply(request)
+                try requireCurrentAwgOperation(operationGeneration)
+                awgOperationCoordinator.queueRefresh()
                 currentAwgConfig = appliedConfig
                 localAwgStatus = appliedConfig.hasNonDefaultValues
                 awgStatusMessage = usesVPNPermission
                     ? "AWG config from \(hostname) applied, restarting VPN..."
                     : "AWG config from \(hostname) applied, restarting app network..."
                 let restarted = await refreshBackendForAwgConfig()
-                _ = await loadLocalAwgStatusOnce(showMessages: false)
+                try requireCurrentAwgOperation(operationGeneration)
+                _ = await loadLocalAwgStatusOnce(
+                    showMessages: false,
+                    operationGeneration: operationGeneration
+                )
+                try requireCurrentAwgOperation(operationGeneration)
                 if restarted {
                     awgStatusMessage = "AWG config from \(hostname) applied successfully"
                 }
             } catch {
-                awgStatusMessage = parseAwgApplyError(error.localizedDescription, hostname: hostname)
+                if isCurrentAwgOperation(operationGeneration) {
+                    awgStatusMessage = parseAwgApplyError(error.localizedDescription, hostname: hostname)
+                }
             }
         }
     }
@@ -2357,20 +2642,34 @@ class AppState: ObservableObject {
     }
 
     func applyManualAwgConfig(_ config: AmneziaWGPrefs) async throws {
-        isAwgOperationInProgress = true
-        defer { isAwgOperationInProgress = false }
+        if let blockReason = awgOperationStartBlockReason(
+            isAnyAwgOperationInProgress: isAnyAwgOperationInProgress,
+            isBackendTransitionInProgress: isBackendTransitionInProgress
+        ) {
+            throw LoginFlowError.localAPI(blockReason)
+        }
+        let operationGeneration = beginAwgOperation()
+        defer { finishAwgOperation(operationGeneration) }
 
         awgStatusMessage = config.hasNonDefaultValues ? "Applying AWG config..." : "Clearing AWG config..."
 
         let (client, _) = try await ensureBackendReadyForAwgSync()
+        try requireCurrentAwgOperation(operationGeneration)
         try await client.patchPrefs(.setAmneziaWG(config))
+        try requireCurrentAwgOperation(operationGeneration)
+        awgOperationCoordinator.queueRefresh()
 
         currentAwgConfig = config
         localAwgStatus = config.hasNonDefaultValues
 
         let restarted = await refreshBackendForAwgConfig()
+        try requireCurrentAwgOperation(operationGeneration)
 
-        _ = await loadLocalAwgStatusOnce(showMessages: false)
+        _ = await loadLocalAwgStatusOnce(
+            showMessages: false,
+            operationGeneration: operationGeneration
+        )
+        try requireCurrentAwgOperation(operationGeneration)
 
         if !restarted {
             throw LoginFlowError.localAPI(awgStatusMessage ?? "Network restart failed")
@@ -2380,6 +2679,29 @@ class AppState: ObservableObject {
     }
 
     // MARK: - AWG Helpers
+
+    private func beginAwgOperation() -> UInt64 {
+        let generation = awgOperationCoordinator.begin()
+        isAwgOperationInProgress = true
+        return generation
+    }
+
+    private func isCurrentAwgOperation(_ generation: UInt64) -> Bool {
+        awgOperationCoordinator.isCurrent(generation)
+    }
+
+    private func requireCurrentAwgOperation(_ generation: UInt64) throws {
+        guard isCurrentAwgOperation(generation) else { throw CancellationError() }
+    }
+
+    private func finishAwgOperation(_ generation: UInt64) {
+        guard let shouldRefresh = awgOperationCoordinator.finish(generation) else { return }
+        isAwgOperationInProgress = false
+        guard shouldRefresh else { return }
+        if !peers.isEmpty {
+            refreshAwgStatus(showMessages: false, force: true)
+        }
+    }
 
       private func ensureBackendReadyForAwgSync() async throws -> (client: LocalAPIClient, vpn: VPNManager?) {
           if usesVPNPermission {
@@ -2569,24 +2891,89 @@ class AppState: ObservableObject {
             + peerKeyCandidates(peer.normalizedHostname)
             + peerKeyCandidates(peer.computedName)
             + peerKeyCandidates(peer.hostinfoHostname)
-        return candidates.lazy.compactMap { self.awgPeersData[$0] }.first
+        let expectedNodeKey = canonicalAwgNodeKey(peer.nodeKey)
+        if expectedNodeKey == nil {
+            let matchingPeerIDs = Set(peers.compactMap { candidate -> String? in
+                candidate.normalizedHostname == peer.normalizedHostname ? candidate.id : nil
+            })
+            guard matchingPeerIDs.count <= 1 else {
+                // A keyless peer cannot safely consume hostname-indexed data
+                // when multiple nodes share that hostname. This prevents a
+                // misleading AWG badge/error even though sync itself is also
+                // protected by fullNodeKeyForAwgSync.
+                return nil
+            }
+        }
+        return candidates.lazy.compactMap { self.awgPeersData[$0] }.first { result in
+            guard let expectedNodeKey else { return true }
+            return canonicalAwgNodeKey(result.nodeKey) == expectedNodeKey
+        }
     }
 
-    private func fullNodeKeyForAwgSync(peer: PeerNode, peerData: AwgPeerResult?) -> String? {
+    func fullNodeKeyForAwgSync(peer: PeerNode, peerData: AwgPeerResult?) -> String? {
         let targetKey = peer.normalizedHostname
-        let matchingPeerNodeKey = peers.first(where: {
-            $0.normalizedHostname == targetKey
-        })?.nodeKey
+        if let peerNodeKey = typedAwgNodeKey(peer.nodeKey) {
+            // The key attached to the selected peer is authoritative even if
+            // another node happens to reuse its hostname.
+            return peerNodeKey
+        }
 
-        let candidates = [
-            peer.nodeKey,
-            matchingPeerNodeKey,
-            peerData?.nodeKey,
-        ]
+        let discoveredNodeKey = typedAwgNodeKey(peerData?.nodeKey)
+        if let selectedRawKey = rawAwgNodeKey(peer.nodeKey) {
+            // Older netmaps may expose the selected node as raw 64-hex while
+            // LocalAPI requires the typed nodekey: form. Only accept a typed
+            // discovery result when it represents that exact same key.
+            guard let discoveredNodeKey,
+                  rawAwgNodeKey(discoveredNodeKey) == selectedRawKey else {
+                return nil
+            }
+            return discoveredNodeKey
+        }
 
-        return candidates.compactMap { $0 }
-            .first { !$0.isEmpty && $0.hasPrefix("nodekey:") }
-            ?? candidates.compactMap { $0 }.first { !$0.isEmpty }
+        // Hostname matching is legacy compatibility only. Never choose the
+        // first match when duplicate hostnames exist; that can sync a config
+        // from the wrong node after a key rotation or profile switch.
+        let matchingPeerIDs = Set(peers.compactMap { candidate -> String? in
+            candidate.normalizedHostname == targetKey ? candidate.id : nil
+        })
+        guard matchingPeerIDs.count <= 1 else {
+            return nil
+        }
+
+        if let discoveredNodeKey {
+            return discoveredNodeKey
+        }
+
+        let hostnameCandidates = Set(peers.compactMap { candidate -> String? in
+            guard candidate.normalizedHostname == targetKey else { return nil }
+            return typedAwgNodeKey(candidate.nodeKey)
+        })
+        return hostnameCandidates.count == 1 ? hostnameCandidates.first : nil
+    }
+
+    private func typedAwgNodeKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("nodekey:") else { return nil }
+        let rawKey = String(trimmed.dropFirst("nodekey:".count))
+        guard isFullAwgNodeKeyHex(rawKey) else { return nil }
+        return "nodekey:\(rawKey.lowercased())"
+    }
+
+    private func rawAwgNodeKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawKey = trimmed.hasPrefix("nodekey:")
+            ? String(trimmed.dropFirst("nodekey:".count))
+            : trimmed
+        guard isFullAwgNodeKeyHex(rawKey) else { return nil }
+        return rawKey.lowercased()
+    }
+
+    private func isFullAwgNodeKeyHex(_ value: String) -> Bool {
+        let hexadecimalDigits = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+        return value.count == 64 &&
+            value.unicodeScalars.allSatisfy { hexadecimalDigits.contains($0) }
     }
 
     private func responseErrorMessage(_ response: IPCResponse) -> String {
@@ -2619,6 +3006,31 @@ class AppState: ObservableObject {
                 awgPeersStatus[key] = false
             }
         }
+    }
+
+    func pruneAwgPeerCache(to currentNodeKeys: Set<String>) {
+        awgPeersData = awgPeersData.filter { _, result in
+            guard let nodeKey = canonicalAwgNodeKey(result.nodeKey) else { return false }
+            return currentNodeKeys.contains(nodeKey)
+        }
+        awgPeersStatus = awgPeersData.mapValues(\.hasAwgConfig)
+    }
+
+    func awgPeerRefreshFingerprint() -> Set<String> {
+        Set(peers.map { peer in
+            let nodeKey = canonicalAwgNodeKey(peer.nodeKey) ?? ""
+            return "\(peer.id)\u{1F}\(nodeKey)\u{1F}\(peer.online)"
+        })
+    }
+
+    private func canonicalAwgNodeKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        var normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("nodekey:") {
+            normalized.removeFirst("nodekey:".count)
+        }
+        normalized = normalized.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return normalized.isEmpty ? nil : normalized
     }
 
     private func parseAwgApplyError(_ message: String, hostname: String) -> String {
