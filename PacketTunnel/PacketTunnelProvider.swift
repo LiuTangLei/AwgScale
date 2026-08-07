@@ -56,7 +56,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         logger.log("startTunnel: beginning")
-        logger.notice("runtime marker awgscale=0.2.1 build=9 recovery=official-soft-refresh-fast30-cd60 refactor=dns-subnet-tka-advertise-routes-mullvad-notifications")
+        logger.notice("runtime marker awgscale=0.3.0 build=10 recovery=official-soft-refresh-fast30-cd60 refactor=dns-subnet-tka-advertise-routes-mullvad-notifications")
         resetTunnelLifecycleState()
         sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
         sharedDefaults?.set(false, forKey: IPCConstants.keyTunnelHasDefaultRoute)
