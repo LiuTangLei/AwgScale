@@ -21,11 +21,7 @@ struct SettingsView: View {
         if !appState.transportAvailable {
             return "This build does not expose a managed packet transport."
         }
-        var text = "QUIC wraps WireGuard in built-in HTTP/3 (MASQUE) with an auto-trusted node identity. Enabling it clears the saved Amnezia-WG profile and restarts the tunnel; the Amnezia-WG configuration below is retained for native mode."
-        if appState.transportPendingRestart {
-            text += " A restart is pending to apply the staged mode."
-        }
-        return text
+        return "QUIC carries traffic as direct native IP over an authenticated QUIC session — it does not tunnel WireGuard inside QUIC. Enabling it clears the saved Amnezia-WG profile and restarts the tunnel; the Amnezia-WG configuration below is retained for native mode."
     }
 
     private var modeSwitchDisabled: Bool {
@@ -114,7 +110,7 @@ struct SettingsView: View {
                     set: { appState.requestQuicTransport($0) }
                 )) {
                     HStack {
-                        SettingsRowLabel(title: "QUIC (built-in H3)", systemImage: "bolt.horizontal.circle", color: .purple)
+                        SettingsRowLabel(title: "QUIC", systemImage: "bolt.horizontal.circle", color: .purple)
                         if appState.isAnyAwgOperationInProgress {
                             Spacer()
                             ProgressView()
@@ -122,6 +118,16 @@ struct SettingsView: View {
                     }
                 }
                 .disabled(!appState.transportAvailable || appState.isAnyAwgOperationInProgress)
+
+                if appState.transportAvailable && appState.isTransportRestartPending && !appState.isAnyAwgOperationInProgress {
+                    HStack {
+                        SettingsRowLabel(title: "Restart pending — not yet active", systemImage: "exclamationmark.triangle.fill", color: .orange)
+                        Spacer()
+                        Text(appState.transportDesiredMode)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             } header: {
                 Text("Packet Transport")
             } footer: {

@@ -3,7 +3,8 @@
 Branch: `feature/quic-1.102.4-20260917` (prior source `c589acb`).
 
 This report documents the iOS implementation that adds a real QUIC packet
-transport (built-in HTTP/3) alongside the retained native Amnezia-WG v2/v3 data
+transport (direct native IP over an authenticated QUIC / HTTP/3 CONNECT-IP
+session) alongside the retained native Amnezia-WG v2/v3 data
 plane, wires the app to the published immutable shared core, and records exact
 build/test results and real-device limitations.
 
@@ -89,7 +90,7 @@ once with the freshly read revision.
   disconnect→reconnect) with their stop/disconnected → start/active state
   verification, so changes are applied by an actual backend/tunnel restart, not
   a UI-only save.
-- `App/Views/SettingsView.swift`: a single **"QUIC (built-in H3)"** toggle in a
+- `App/Views/SettingsView.swift`: a single **"QUIC"** toggle in a
   new "Packet Transport" section. Enabling it selects QUIC (clearing AWG) and
   restarts; disabling returns to native. The Amnezia-WG v2/v3 configuration UI
   is retained for native mode. The toggle reflects the backend's actual staged
@@ -121,9 +122,15 @@ Environment: macOS, Xcode 27.0 (27A5194q); Go toolchain `go1.26.6`.
     `testTransportControlStatusDecodesSnakeCaseAndIgnoresUnknownKeys`,
     `testTransportControlStatusQuicModeMapping`,
     `testTransportRequestSelectQuicEncodesOnlyKnownFields`,
-    `testTransportRequestApplyAWGEmbedsCanonicalConfigAndStagesNative`.
-  - Full suite targets present and building/passing: `AppStateTests` (36),
-    `LocalAPITests` (17), `ModelsTests` (24), `TunnelConfigBridgeTests` (15).
+    `testTransportRequestApplyAWGEmbedsCanonicalConfigAndStagesNative`,
+    plus the post-review acceptance-contract test
+    `testTransportVerificationIsLiveAcceptsOnlyExactRunningMode` (**25 total**).
+  - `AppStateTests`: **38 tests, 0 failures**, including the post-review
+    regression tests `testQuicToggleReflectsActiveModeNotDesired` (toggle
+    mirrors the running mode, pending is surfaced as unfinished) and
+    `testTunnelFullyStoppedContractRejectsDisconnecting`.
+  - Full suite targets building/passing: `AppStateTests` (38),
+    `LocalAPITests` (17), `ModelsTests` (25), `TunnelConfigBridgeTests` (15).
 - `./build_unsigned_ipa.sh` — `** BUILD SUCCEEDED **`.
 
 ### Artifacts
@@ -152,7 +159,8 @@ require device-side `ldid` / a CoreTrust bypass to complete installation.
   on real hardware**, and the host VPN was not modified. Per task scope, no
   installation on real phones was attempted.
 - Consequently, the **QUIC (HTTP/3) data-plane runtime** — a live tunnel that
-  actually carries traffic over the built-in H3 carrier to a peer — was **not
+  actually carries traffic over the QUIC (HTTP/3 CONNECT-IP) carrier to a peer —
+  was **not
   validated end-to-end on device**. Validation covered: the backend compiling
   and linking the quic-go fork against the published core, the managed-transport
   wiring that exposes `ConfigureTransport`, the request/response contracts
@@ -167,3 +175,49 @@ Only this repository (`tailscale-ios`) was modified. No other repositories were
 changed; nothing was published, pushed, or tagged; no other agents were stopped.
 Core publication / shared-core / Android remain owned by the parent. No secrets
 or key material appear in this report or in source.
+
+## 10. Post-review corrections (parent review of `197c2f5`)
+
+All six concrete blockers from the parent review were fixed in-repo, with new
+focused Swift regression tests (previous tests only covered JSON):
+
+1. **Accurate QUIC description / single title.** The Settings label is now just
+   **"QUIC"** (no "built-in H3" choice), and the footer states QUIC is *direct
+   native IP over an authenticated QUIC session — it does not tunnel WireGuard
+   inside QUIC* (this core is native IP over HTTP/3 CONNECT-IP, not WG-over-QUIC).
+2. **Explicit post-restart verification.** `setQuicTransport` no longer trusts a
+   restarted/connected state. After the restart it polls the newly active
+   backend (`verifyTransportLive`, bounded) and only reports success when
+   `active == expected mode`, `desired == active`, and `!pending_restart`. A
+   timeout/mismatch throws; success is never reported on a mere VPN-connected
+   state.
+3. **Toggle reflects ACTIVE mode; pending is a failure, not success.**
+   `isQuicTransportEnabled` now reads `transportActiveMode` (not desired), and a
+   new `isTransportRestartPending` drives a visible "Restart pending — not yet
+   active" warning row. No staged-but-not-running selection can appear as on.
+4. **No start over a non-stopped tunnel.** `autoReconnectForAwgConfig` now awaits
+   an actual `.disconnected`/`.invalid` state via `waitForTunnelFullyStopped`
+   (bounded) and refuses to start a new tunnel owner if the previous one has not
+   fully stopped (`.disconnecting` is not accepted).
+5. **AWG apply/sync verify native mode + reloaded profile.** `applyManualAwgConfig`
+   and `syncAwgConfigFromPeer` now call `verifyNativeAwgApplied`, which confirms
+   (from a fresh backend read) that native mode is actually running and that the
+   expected profile reloaded (`localAwgStatus == expected.hasNonDefaultValues`).
+   A silently-false status reload is treated as failure, not ignored. This uses
+   a direct post-restart client (`postRestartLocalAPIClient`) so the mid-operation
+   `isBackendTransitionInProgress` gate no longer masks the read.
+6. **No automatic stale-CAS replay.** The 409 auto-retry was removed. A revision
+   conflict now refreshes local state and surfaces a "changed elsewhere — review
+   and try again" error requiring fresh confirmation, so an external edit can
+   never be overwritten with stale intent.
+
+New regression tests: `testTransportVerificationIsLiveAcceptsOnlyExactRunningMode`
+(expected-mode verification, pending/mismatch refusal), `testQuicToggleReflects
+ActiveModeNotDesired` (no stale selected state; pending visible), and
+`testTunnelFullyStoppedContractRejectsDisconnecting` (restart/stop contract).
+
+Rebuild scope: Go was **not** changed by this correction, so per policy the
+xcframework was **not** rebuilt (reused). Swift changed, so the full Swift test
+suite was re-run (`** TEST SUCCEEDED **`) and the ad-hoc IPA was refreshed
+(`build/unsigned-ipa/AwgScale-trollstore.ipa`, 24 MB). Real-device runtime QUIC
+validation remains unavailable (no physical iOS device online).

@@ -441,4 +441,27 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(awg["JMin"] as? Int, 40)
         XCTAssertEqual(awg["S1"] as? Int, 20)
     }
+
+    func testTransportVerificationIsLiveAcceptsOnlyExactRunningMode() throws {
+        func status(active: String, desired: String, pending: Bool) throws -> TransportControlStatus {
+            let json = """
+            {"active_mode":"\(active)","desired_mode":"\(desired)","pending_restart":\(pending),"available":true,"source":"managed","revision":"3","awg_configured":false}
+            """.data(using: .utf8)!
+            return try JSONDecoder().decode(TransportControlStatus.self, from: json)
+        }
+        // Accepted: engine actually runs the expected mode, desired==active, not pending.
+        XCTAssertTrue(TransportVerification.isLive(
+            try status(active: "http3-ip", desired: "http3-ip", pending: false), expectedMode: "http3-ip"))
+        XCTAssertTrue(TransportVerification.isLive(
+            try status(active: "native", desired: "native", pending: false), expectedMode: "native"))
+        // Refused: staged but not yet running (pending restart).
+        XCTAssertFalse(TransportVerification.isLive(
+            try status(active: "native", desired: "http3-ip", pending: true), expectedMode: "http3-ip"))
+        // Refused: desired diverges from active even without the pending flag.
+        XCTAssertFalse(TransportVerification.isLive(
+            try status(active: "native", desired: "http3-ip", pending: false), expectedMode: "http3-ip"))
+        // Refused: running mode is not what the caller expected.
+        XCTAssertFalse(TransportVerification.isLive(
+            try status(active: "native", desired: "native", pending: false), expectedMode: "http3-ip"))
+    }
 }

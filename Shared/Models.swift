@@ -707,6 +707,22 @@ struct TransportControlRequest: Codable {
     }
 }
 
+/// Pure decision helpers for packet-transport verification. Kept free of
+/// backend/UI state and side effects so the acceptance contracts can be
+/// unit-tested directly.
+enum TransportVerification {
+    /// A staged selection is only accepted as *live* when the running engine
+    /// reports the expected mode, the desired mode equals the active mode, and
+    /// no restart is still pending. A backend/VPN "connected" state alone is
+    /// explicitly not sufficient, and a pending restart is a failure, not a
+    /// success.
+    static func isLive(_ status: TransportControlStatus, expectedMode: String) -> Bool {
+        status.activeMode == expectedMode
+            && status.desiredMode == status.activeMode
+            && !status.pendingRestart
+    }
+}
+
 /// Local prefs subset for AWG configuration check.
 struct LocalPrefs: Codable {
     let AmneziaWG: AmneziaWGPrefs?

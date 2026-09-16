@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import NetworkExtension
 @testable import AwgScale
 
 private actor LocalPrefsResponseGate {
@@ -938,5 +939,45 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(
             highSeverityHealthNotifications(from: Optional<HealthState>.none).isEmpty
         )
+    }
+
+    // MARK: - Packet transport (QUIC) UI contracts
+
+    func testQuicToggleReflectsActiveModeNotDesired() {
+        let state = AppState()
+
+        // A staged-but-not-running QUIC selection must NOT read as enabled: the
+        // toggle mirrors the mode actually running, and the pending state is
+        // surfaced as unfinished rather than success.
+        state.transportAvailable = true
+        state.transportActiveMode = "native"
+        state.transportDesiredMode = "http3-ip"
+        state.transportPendingRestart = true
+        XCTAssertFalse(state.isQuicTransportEnabled)
+        XCTAssertTrue(state.isTransportRestartPending)
+
+        // Once QUIC is actually running, it reads as enabled and no longer pending.
+        state.transportActiveMode = "http3-ip"
+        state.transportDesiredMode = "http3-ip"
+        state.transportPendingRestart = false
+        XCTAssertTrue(state.isQuicTransportEnabled)
+        XCTAssertFalse(state.isTransportRestartPending)
+
+        // A divergence between active and desired is pending even without the flag.
+        state.transportActiveMode = "http3-ip"
+        state.transportDesiredMode = "native"
+        state.transportPendingRestart = false
+        XCTAssertTrue(state.isTransportRestartPending)
+    }
+
+    func testTunnelFullyStoppedContractRejectsDisconnecting() {
+        // Only .disconnected/.invalid count as fully stopped; a new tunnel owner
+        // must never start while the previous one is still tearing down.
+        XCTAssertTrue(NEVPNStatus.disconnected.isFullyStopped)
+        XCTAssertTrue(NEVPNStatus.invalid.isFullyStopped)
+        XCTAssertFalse(NEVPNStatus.disconnecting.isFullyStopped)
+        XCTAssertFalse(NEVPNStatus.connected.isFullyStopped)
+        XCTAssertFalse(NEVPNStatus.connecting.isFullyStopped)
+        XCTAssertFalse(NEVPNStatus.reasserting.isFullyStopped)
     }
 }

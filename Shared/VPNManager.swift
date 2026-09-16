@@ -1,6 +1,16 @@
 import Foundation
 import NetworkExtension
 
+extension NEVPNStatus {
+    /// A tunnel is only *fully stopped* when it is disconnected or invalid.
+    /// `.disconnecting` is a transient state and must not be treated as stopped:
+    /// a new tunnel owner must never be started while the previous one is still
+    /// tearing down.
+    var isFullyStopped: Bool {
+        self == .disconnected || self == .invalid
+    }
+}
+
 /// Manages the VPN tunnel connection via NEVPNManager.
 ///
 /// This is the main App's interface to control the Packet Tunnel Extension.

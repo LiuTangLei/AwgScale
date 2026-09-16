@@ -327,10 +327,17 @@ class AppState: ObservableObject {
     /// selection is only offered when true.
     @Published var transportAvailable: Bool = false
 
-    /// Single UI switch state: the built-in QUIC (HTTP/3) carrier is selected
-    /// when the desired mode is a QUIC mode.
+    /// Single UI switch state. It must reflect the mode the engine is *actually*
+    /// running (active), never a staged-but-not-yet-running desired mode, so a
+    /// failed or still-pending switch can never appear as success.
     var isQuicTransportEnabled: Bool {
-        TransportControlStatus.quicModes.contains(transportDesiredMode)
+        TransportControlStatus.quicModes.contains(transportActiveMode)
+    }
+
+    /// True when a staged transport change has not yet been confirmed running.
+    /// The UI must surface this as an unfinished/failed switch, not success.
+    var isTransportRestartPending: Bool {
+        transportPendingRestart || transportActiveMode != transportDesiredMode
     }
     /// Whether AWG peers have been loaded (prevent duplicate requests)
     private var awgPeersLoaded = false
@@ -2640,14 +2647,13 @@ class AppState: ObservableObject {
                     : "AWG config from \(hostname) applied, restarting app network..."
                 let restarted = await refreshBackendForAwgConfig()
                 try requireCurrentAwgOperation(operationGeneration)
-                _ = await loadLocalAwgStatusOnce(
-                    showMessages: false,
-                    operationGeneration: operationGeneration
-                )
-                try requireCurrentAwgOperation(operationGeneration)
-                if restarted {
-                    awgStatusMessage = "AWG config from \(hostname) applied successfully"
+                guard restarted else {
+                    throw LoginFlowError.localAPI(awgStatusMessage ?? "Network restart failed")
                 }
+                // A synced profile is non-zero; confirm native mode is running
+                // and the profile actually reloaded before reporting success.
+                try await verifyNativeAwgApplied(appliedConfig, operationGeneration: operationGeneration)
+                awgStatusMessage = "AWG config from \(hostname) applied successfully"
             } catch {
                 if isCurrentAwgOperation(operationGeneration) {
                     awgStatusMessage = parseAwgApplyError(error.localizedDescription, hostname: hostname)
@@ -2683,16 +2689,13 @@ class AppState: ObservableObject {
 
         let restarted = await refreshBackendForAwgConfig()
         try requireCurrentAwgOperation(operationGeneration)
-
-        _ = await loadLocalAwgStatusOnce(
-            showMessages: false,
-            operationGeneration: operationGeneration
-        )
-        try requireCurrentAwgOperation(operationGeneration)
-
-        if !restarted {
+        guard restarted else {
             throw LoginFlowError.localAPI(awgStatusMessage ?? "Network restart failed")
         }
+
+        // Confirm the restarted engine is actually native and reloaded exactly
+        // this profile before reporting success.
+        try await verifyNativeAwgApplied(config, operationGeneration: operationGeneration)
 
         awgStatusMessage = config.hasNonDefaultValues ? "AWG config applied successfully" : "AWG config cleared"
     }
@@ -2715,10 +2718,12 @@ class AppState: ObservableObject {
         transportAvailable = status.available
     }
 
-    /// Selects the built-in QUIC (HTTP/3) carrier or returns to native, then
-    /// restarts the serialized app backend or packet tunnel so the staged mode
-    /// actually runs (verified via stop→start / disconnected→active). Selecting
-    /// QUIC clears any saved AWG profile in the core.
+    /// Selects the direct native-IP QUIC carrier or returns to native, then
+    /// restarts the serialized app backend or packet tunnel and *verifies* the
+    /// newly active backend is actually running the selected mode before
+    /// reporting success. Selecting QUIC clears any saved AWG profile in the
+    /// core. QUIC here is direct native IP over an authenticated QUIC session,
+    /// not WireGuard tunneled inside QUIC.
     func setQuicTransport(_ enabled: Bool) async throws {
         if let blockReason = awgOperationStartBlockReason(
             isAnyAwgOperationInProgress: isAnyAwgOperationInProgress,
@@ -2741,33 +2746,43 @@ class AppState: ObservableObject {
         let request: TransportControlRequest = enabled
             ? .selectQuic(expectedRevision: status.revision)
             : .selectNative(expectedRevision: status.revision)
-        let staged = try await configureTransportWithConflictRetry(client, request)
+        let staged = try await stageTransport(client, request)
         applyTransportStatus(staged)
         try requireCurrentAwgOperation(operationGeneration)
         awgOperationCoordinator.queueRefresh()
 
-        // The core clears AWG when QUIC is selected; mirror it locally so the UI
-        // does not show a stale "AWG enabled" state before the refresh lands.
-        if enabled {
-            currentAwgConfig = .empty
-            localAwgStatus = false
-        }
+        // The core resolves "quic" to a concrete carrier (http3-ip); trust the
+        // staged desired mode as the exact mode the restarted engine must run.
+        let expectedMode = staged.desiredMode
 
         let restarted = await refreshBackendForAwgConfig()
         try requireCurrentAwgOperation(operationGeneration)
-
-        await refreshTransportStatus()
-        _ = await loadLocalAwgStatusOnce(
-            showMessages: false,
-            operationGeneration: operationGeneration
-        )
-        try requireCurrentAwgOperation(operationGeneration)
-
-        if !restarted {
+        guard restarted else {
             throw LoginFlowError.localAPI(awgStatusMessage ?? "Network restart failed")
         }
 
-        awgStatusMessage = enabled ? "QUIC transport enabled" : "Native transport restored"
+        // Explicitly confirm from the newly active backend that the selected
+        // mode is running (active == expected, desired == active, no pending
+        // restart). A mere restarted/connected state is not acceptance.
+        guard let verified = await verifyTransportLive(expectedMode: expectedMode) else {
+            throw LoginFlowError.localAPI(
+                "Transport staged but the restarted backend is not running \"\(expectedMode)\" yet (still pending or mismatched). The change was not accepted."
+            )
+        }
+        try requireCurrentAwgOperation(operationGeneration)
+
+        // Reflect the real AWG state the backend reloaded (QUIC clears it).
+        if let verifyClient = postRestartLocalAPIClient() {
+            _ = await loadLocalAwgStatusOnce(
+                showMessages: false,
+                clientOverride: verifyClient,
+                operationGeneration: operationGeneration
+            )
+        }
+        try requireCurrentAwgOperation(operationGeneration)
+
+        awgStatusMessage = TransportControlStatus.quicModes.contains(verified.activeMode)
+            ? "QUIC transport active" : "Native transport active"
     }
 
     /// Synchronous entry point for the single QUIC toggle in Settings. Launches
@@ -2781,7 +2796,10 @@ class AppState: ObservableObject {
                 // Superseded by a newer operation; the winner owns final state.
             } catch {
                 awgStatusMessage = error.localizedDescription
+                // Re-read the actual backend state so the toggle and AWG star
+                // reflect reality after a refused/failed switch.
                 await refreshTransportStatus()
+                _ = await loadLocalAwgStatusOnce(showMessages: false)
             }
         }
     }
@@ -2791,33 +2809,113 @@ class AppState: ObservableObject {
     /// saves AWG together; otherwise the direct prefs path is used unchanged.
     private func applyAwgViaCoordinatedTransport(_ client: LocalAPIClient, config: AmneziaWGPrefs) async throws {
         if let status = try? await client.transportStatus(), status.available, status.isQuicSelected {
-            let staged = try await configureTransportWithConflictRetry(
-                client, .applyAWG(config, expectedRevision: status.revision)
-            )
+            let staged = try await stageTransport(client, .applyAWG(config, expectedRevision: status.revision))
             applyTransportStatus(staged)
         } else {
             try await client.patchPrefs(.setAmneziaWG(config))
         }
     }
 
-    /// Stages a transport change, retrying once if a concurrent revision bump
-    /// caused a 409 conflict.
-    private func configureTransportWithConflictRetry(
+    /// Stages a transport change. A revision (CAS) conflict is **not** replayed
+    /// automatically: silently re-issuing against a newer revision could
+    /// overwrite a concurrent external edit with stale intent. The conflict is
+    /// surfaced so the caller/user can re-read and confirm fresh.
+    private func stageTransport(
         _ client: LocalAPIClient,
         _ request: TransportControlRequest
     ) async throws -> TransportControlStatus {
         do {
             return try await client.configureTransport(request)
         } catch let LocalAPIError.unsuccessfulStatus(statusCode, _, _) where statusCode == 409 {
-            let fresh = try await client.transportStatus()
-            let retried = TransportControlRequest(
-                action: request.action,
-                expectedRevision: fresh.revision,
-                mode: request.mode,
-                awg: request.awg
+            await refreshTransportStatus()
+            throw LoginFlowError.localAPI(
+                "The transport profile changed elsewhere (revision conflict). No change was made — review the current transport state and try again."
             )
-            return try await client.configureTransport(retried)
         }
+    }
+
+    /// A LocalAPI client bound directly to the backend that owns the tunnel
+    /// after a restart, bypassing the mid-operation `isBackendTransitionInProgress`
+    /// gate that `activeLocalAPIClient()` enforces. Used only for post-restart
+    /// verification while an AWG/transport operation is still in progress.
+    private func postRestartLocalAPIClient() -> LocalAPIClient? {
+        if usesVPNPermission {
+            guard let vpn = vpnManager, vpn.isTunnelActive else { return nil }
+            return .vpn(vpn)
+        }
+        guard loginBackend.isRunning else { return nil }
+        return .login(loginBackend)
+    }
+
+    /// Polls the newly active backend until it reports the expected mode as
+    /// live, or a bounded timeout elapses. Returns the verified status, or nil
+    /// on timeout/mismatch — the caller must treat nil as failure and never
+    /// report success.
+    private func verifyTransportLive(expectedMode: String, timeout: TimeInterval = 8.0) async -> TransportControlStatus? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let client = postRestartLocalAPIClient(),
+               let status = try? await client.transportStatus() {
+                applyTransportStatus(status)
+                if TransportVerification.isLive(status, expectedMode: expectedMode) {
+                    return status
+                }
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        } while Date() < deadline
+        return nil
+    }
+
+    /// After a native+AWG apply/sync restart, verify the running engine is
+    /// actually native (not still QUIC / pending) and that the expected AWG
+    /// profile was reloaded, before the caller may report success. Throws
+    /// otherwise; never accepts a silently-false status reload.
+    private func verifyNativeAwgApplied(_ expected: AmneziaWGPrefs, operationGeneration: UInt64) async throws {
+        guard let client = postRestartLocalAPIClient() else {
+            throw LoginFlowError.localAPI(
+                "AWG applied but no active backend was available to confirm the reloaded profile. The change was not accepted."
+            )
+        }
+        // Read fresh availability from the restarted backend rather than trust a
+        // possibly-stale published flag. When a managed transport is present,
+        // native mode must actually be running before AWG can be accepted.
+        if let status = try? await client.transportStatus(), status.available {
+            applyTransportStatus(status)
+            guard await verifyTransportLive(expectedMode: "native") != nil else {
+                throw LoginFlowError.localAPI(
+                    "AWG staged but the restarted backend is not running native mode yet. The change was not accepted."
+                )
+            }
+            try requireCurrentAwgOperation(operationGeneration)
+        }
+        let reloaded = await loadLocalAwgStatusOnce(
+            showMessages: false,
+            clientOverride: client,
+            operationGeneration: operationGeneration
+        )
+        try requireCurrentAwgOperation(operationGeneration)
+        guard reloaded else {
+            throw LoginFlowError.localAPI(
+                "AWG applied but the backend did not report the reloaded profile. The change was not accepted."
+            )
+        }
+        guard localAwgStatus == expected.hasNonDefaultValues else {
+            throw LoginFlowError.localAPI(
+                "AWG state after restart does not match the applied profile. The change was not accepted."
+            )
+        }
+    }
+
+    /// Waits until the VPN reports an actually-stopped state within a bounded
+    /// timeout. `.disconnecting` is not accepted; returns false if the previous
+    /// tunnel has not fully stopped so the caller can refuse to start a new one.
+    private func waitForTunnelFullyStopped(_ vpn: VPNManager, timeout: TimeInterval = 6.0) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if vpn.updateStatusFromConnection().isFullyStopped { return true }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        } while Date() < deadline
+        return vpn.updateStatusFromConnection().isFullyStopped
     }
 
     // MARK: - AWG Helpers
@@ -2900,10 +2998,13 @@ class AppState: ObservableObject {
 
         await vpn.prepareToDisconnect()
         vpn.disconnect()
-        for _ in 0..<25 {
-            _ = vpn.updateStatusFromConnection()
-            if !vpn.isTunnelActive { break }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+
+        // Wait for the previous tunnel to *actually* stop (.disconnected /
+        // .invalid). Never start a new tunnel owner while the old one is still
+        // active or merely disconnecting; fail with a bounded path instead.
+        guard await waitForTunnelFullyStopped(vpn) else {
+            awgStatusMessage = "AWG config applied but the previous tunnel did not stop; it was not restarted."
+            return false
         }
 
         do {
