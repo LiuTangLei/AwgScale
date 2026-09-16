@@ -2751,9 +2751,12 @@ class AppState: ObservableObject {
         try requireCurrentAwgOperation(operationGeneration)
         awgOperationCoordinator.queueRefresh()
 
-        // The core resolves "quic" to a concrete carrier (http3-ip); trust the
-        // staged desired mode as the exact mode the restarted engine must run.
-        let expectedMode = staged.desiredMode
+        // The public QUIC choice has one concrete implementation. Do not
+        // accept a different saved mode merely because a request succeeded.
+        let expectedMode = enabled ? "http3-ip" : "native"
+        guard staged.desiredMode == expectedMode else {
+            throw LoginFlowError.localAPI("The backend did not save the requested transport mode.")
+        }
 
         let restarted = await refreshBackendForAwgConfig()
         try requireCurrentAwgOperation(operationGeneration)
@@ -2879,15 +2882,15 @@ class AppState: ObservableObject {
         // Read fresh availability from the restarted backend rather than trust a
         // possibly-stale published flag. When a managed transport is present,
         // native mode must actually be running before AWG can be accepted.
-        if let status = try? await client.transportStatus(), status.available {
-            applyTransportStatus(status)
-            guard await verifyTransportLive(expectedMode: "native") != nil else {
-                throw LoginFlowError.localAPI(
-                    "AWG staged but the restarted backend is not running native mode yet. The change was not accepted."
-                )
-            }
-            try requireCurrentAwgOperation(operationGeneration)
+        let status = try await client.transportStatus()
+        applyTransportStatus(status)
+        guard status.available,
+              await verifyTransportLive(expectedMode: "native") != nil else {
+            throw LoginFlowError.localAPI(
+                "AWG staged but the restarted backend is not running native mode yet. The change was not accepted."
+            )
         }
+        try requireCurrentAwgOperation(operationGeneration)
         let reloaded = await loadLocalAwgStatusOnce(
             showMessages: false,
             clientOverride: client,
@@ -2899,7 +2902,7 @@ class AppState: ObservableObject {
                 "AWG applied but the backend did not report the reloaded profile. The change was not accepted."
             )
         }
-        guard localAwgStatus == expected.hasNonDefaultValues else {
+        guard (currentAwgConfig ?? .empty).matchesEffectiveConfiguration(expected) else {
             throw LoginFlowError.localAPI(
                 "AWG state after restart does not match the applied profile. The change was not accepted."
             )

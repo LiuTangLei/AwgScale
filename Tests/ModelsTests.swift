@@ -3,6 +3,27 @@ import XCTest
 
 final class ModelsTests: XCTestCase {
 
+    func testAWGReadbackComparesProfileNotOnlyEnabledState() throws {
+        let requested = AmneziaWGPrefs(JC: 4, S1: 19, H1: MagicHeaderRange(min: 10, max: 20))
+        let same = try JSONDecoder().decode(AmneziaWGPrefs.self, from:
+            Data(#"{"JC":4,"JMin":0,"S1":19,"I1":"","H1":{"Min":10,"Max":20},"H2":0}"#.utf8))
+        XCTAssertTrue(requested.matchesEffectiveConfiguration(same))
+        XCTAssertFalse(requested.matchesEffectiveConfiguration(AmneziaWGPrefs(JC: 5, S1: 19)))
+        XCTAssertFalse(requested.matchesEffectiveConfiguration(
+            AmneziaWGPrefs(JC: 4, S1: 19, H1: MagicHeaderRange(min: 10, max: 21))))
+        XCTAssertFalse(requested.matchesEffectiveConfiguration(.empty))
+    }
+
+    func testAWGReadbackNormalizesAbsentZeroAndProtectionKey() {
+        XCTAssertTrue(AmneziaWGPrefs.empty.matchesEffectiveConfiguration(
+            AmneziaWGPrefs(JC: 0, I1: "", H1: MagicHeaderRange(min: 0, max: 0),
+                           HeaderProtectionKey: String(repeating: "0", count: 64))))
+        let upper = AmneziaWGPrefs(HeaderProtectionKey: String(repeating: "AB", count: 32))
+        let lower = AmneziaWGPrefs(HeaderProtectionKey: String(repeating: "ab", count: 32))
+        XCTAssertTrue(upper.matchesEffectiveConfiguration(lower))
+        XCTAssertFalse(upper.matchesEffectiveConfiguration(.empty))
+    }
+
     // MARK: - IpnState
 
     func testIpnStateFromRawValue() {

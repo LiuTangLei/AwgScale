@@ -1,10 +1,30 @@
 # AwgScale
 
-**An open source Tailscale-compatible iOS client with Amnezia-WG / AWG support.**
+**An open source Tailscale-compatible iOS client with Amnezia-WG and QUIC support.**
 
 AwgScale is independent software — not affiliated with, sponsored by, or approved by Tailscale Inc.
 
 ---
+
+## 1.102.4 QUIC preview
+
+[Download the 1.102.4 preview](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.102.4).
+The Settings screen has one **QUIC** choice; HTTP/3 is its built-in carrier, not
+a separate selection. QUIC carries native IP directly, not WireGuard packets.
+
+Selecting QUIC clears saved AWG parameters and restarts the active app backend
+or packet tunnel. Applying/syncing AWG coordinates native mode and its profile,
+then activates them with a restart. The UI verifies the actual running mode,
+no pending restart, and the reloaded AWG profile before reporting success.
+Existing App Group, Keychain, package identifiers and native AWG v2/v3 support
+are preserved. All communicating peers need compatible active modes.
+
+The IPA is **ad-hoc/TrollStore-oriented**, not Apple distribution-signed or an
+App Store/TestFlight release. The two-slice Go framework and device IPA build
+completed; the final simulator suite passed **97 tests**. A physical iOS device
+was not available, so system-VPN QUIC traffic and real-device activation are
+still pending field validation. The preview is not marked stable for that reason.
+See [implementation and verification notes](docs/quic-1.102.4-work-report.md).
 
 ## Which install method are you using?
 
@@ -43,7 +63,7 @@ Free accounts cannot request the Network Extension entitlement. The app runs in 
 # Build the Go framework
 ./build_go.sh --all
 
-# Build a TrollStore-ready unsigned IPA
+# Build the ad-hoc signed IPA for TrollStore or later re-signing
 ./build_unsigned_ipa.sh
 # Output: build/unsigned-ipa/AwgScale-trollstore.ipa
 ```
@@ -58,9 +78,12 @@ xcodebuild build -project AwgScale.xcodeproj -scheme AwgScale \
 ```
 
 `build_go.sh` verifies that the framework resolves
-`github.com/LiuTangLei/tailscale` at the 1.102.2-compatible live-peer-sync
-revision and `github.com/LiuTangLei/wireguard-go v0.0.30` before compiling.
-This runtime supports both historical AWG v2 profiles and AWG v3 profiles.
+`github.com/LiuTangLei/tailscale` at immutable corrected-1.102.4 source
+`1f00235ed2ce`, `github.com/LiuTangLei/wireguard-go v0.0.32`, and the published
+`github.com/LiuTangLei/quic-go v0.62.0-tailscale.4` before compiling.
+The Go pseudo-version begins with `v1.102.5-0` solely to pin the exact commit;
+it is not an upgrade to an upstream 1.102.5 release. `GOWORK=off` prevents ambient
+local source replacements. This runtime supports native AWG v2/v3 and QUIC.
 
 App-only UI can be developed in the Simulator. The system VPN tunnel requires a device with a valid Network Extension entitlement.
 

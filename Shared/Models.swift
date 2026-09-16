@@ -321,6 +321,29 @@ struct AmneziaWGPrefs: Codable {
     static let empty = AmneziaWGPrefs()
     private static let zeroHeaderProtectionKey = String(repeating: "0", count: 64)
 
+    /// Compare the actual profile, not just whether some AWG option is enabled.
+    /// Go serializes omitted numeric/string fields as zero/empty on readback.
+    func matchesEffectiveConfiguration(_ other: Self) -> Bool {
+        let numbers: [KeyPath<Self, Int?>] = [\.JC, \.JMin, \.JMax, \.S1, \.S2, \.S3, \.S4]
+        let strings: [KeyPath<Self, String?>] = [\.I1, \.I2, \.I3, \.I4, \.I5]
+        let ranges: [KeyPath<Self, MagicHeaderRange?>] = [
+            \.H1, \.H2, \.H3, \.H4, \.ContentPaddingAddition,
+            \.RekeyAfterTime, \.RekeyTimeout, \.RejectAfterTime,
+            \.KeepaliveTimeout, \.MaxHandshakeAttempts,
+        ]
+        func normalizedKey(_ value: String?) -> String {
+            let key = (value ?? "").lowercased()
+            return key == Self.zeroHeaderProtectionKey ? "" : key
+        }
+        return numbers.allSatisfy { (self[keyPath: $0] ?? 0) == (other[keyPath: $0] ?? 0) }
+            && strings.allSatisfy { (self[keyPath: $0] ?? "") == (other[keyPath: $0] ?? "") }
+            && ranges.allSatisfy {
+                (self[keyPath: $0]?.min ?? 0) == (other[keyPath: $0]?.min ?? 0)
+                    && (self[keyPath: $0]?.max ?? 0) == (other[keyPath: $0]?.max ?? 0)
+            }
+            && normalizedKey(HeaderProtectionKey) == normalizedKey(other.HeaderProtectionKey)
+    }
+
     /// Accepts the Go field names, lower-case historical names, and wireguard-go's
     /// snake_case v3 names. Unknown fields are ignored only when at least one known
     /// AWG field is present, preventing an unrelated JSON object from clearing AWG.

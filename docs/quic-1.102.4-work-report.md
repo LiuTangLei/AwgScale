@@ -69,8 +69,8 @@ app restarts the backend/tunnel to activate it.
 - **Native + AWG (not in QUIC)**: unchanged direct prefs path
   (`PATCH /localapi/v0/prefs`), preserving existing behavior.
 
-`ExpectedRevision` is sent on every mutation; a 409 revision conflict is retried
-once with the freshly read revision.
+`ExpectedRevision` is sent on every mutation. A 409 revision conflict is surfaced
+for fresh user confirmation; it is not automatically replayed.
 
 ## 4. iOS app changes (Swift)
 
@@ -85,7 +85,7 @@ once with the freshly read revision.
   `transportAvailable`, `isQuicTransportEnabled`), `refreshTransportStatus()`,
   `setQuicTransport(_:)` / `requestQuicTransport(_:)`, a coordinated
   `applyAwgViaCoordinatedTransport` used by `applyManualAwgConfig`, and a
-  409-conflict retry helper. Activation reuses the existing serialized restart
+  revision-conflict reporting helper. Activation reuses the existing serialized restart
   paths (`refreshBackendForAwgConfig` → app-backend restart or VPN
   disconnect→reconnect) with their stop/disconnected → start/active state
   verification, so changes are applied by an actual backend/tunnel restart, not
@@ -124,7 +124,7 @@ Environment: macOS, Xcode 27.0 (27A5194q); Go toolchain `go1.26.6`.
     `testTransportRequestSelectQuicEncodesOnlyKnownFields`,
     `testTransportRequestApplyAWGEmbedsCanonicalConfigAndStagesNative`,
     plus the post-review acceptance-contract test
-    `testTransportVerificationIsLiveAcceptsOnlyExactRunningMode` (**25 total**).
+    `testTransportVerificationIsLiveAcceptsOnlyExactRunningMode` (**25 at that review**).
   - `AppStateTests`: **38 tests, 0 failures**, including the post-review
     regression tests `testQuicToggleReflectsActiveModeNotDesired` (toggle
     mirrors the running mode, pending is surfaced as unfinished) and
@@ -202,7 +202,7 @@ focused Swift regression tests (previous tests only covered JSON):
 5. **AWG apply/sync verify native mode + reloaded profile.** `applyManualAwgConfig`
    and `syncAwgConfigFromPeer` now call `verifyNativeAwgApplied`, which confirms
    (from a fresh backend read) that native mode is actually running and that the
-   expected profile reloaded (`localAwgStatus == expected.hasNonDefaultValues`).
+   expected profile reloaded (subsequently strengthened to compare every supported field).
    A silently-false status reload is treated as failure, not ignored. This uses
    a direct post-restart client (`postRestartLocalAPIClient`) so the mid-operation
    `isBackendTransitionInProgress` gate no longer masks the read.
@@ -221,3 +221,20 @@ xcframework was **not** rebuilt (reused). Swift changed, so the full Swift test
 suite was re-run (`** TEST SUCCEEDED **`) and the ad-hoc IPA was refreshed
 (`build/unsigned-ipa/AwgScale-trollstore.ipa`, 24 MB). Real-device runtime QUIC
 validation remains unavailable (no physical iOS device online).
+
+## 11. Final parent verification
+
+The acceptance check now compares all supported AWG fields, not merely whether
+both profiles are enabled. It normalizes omitted fields to their Go zero values
+and hexadecimal protection-key case, and refuses a different nonzero profile.
+A failed transport-status request is no longer silently treated as evidence of
+native mode. QUIC/native selection verifies the exact requested concrete mode,
+not just whichever desired mode happened to be returned.
+
+The final Xcode result bundle `build/final-quic-review.xcresult` reports **97 tests
+passed, 0 failed, 0 skipped**. Two new tests cover full-profile equivalence and
+absent/zero normalization. `GOTOOLCHAIN=go1.26.6 GOWORK=off go test ./libtailscale`
+also passed. Go sources and dependencies did not change in this final review;
+the existing verified two-slice xcframework is reused, while the IPA is rebuilt
+from the final Swift source. Release signing remains ad-hoc only, and physical
+iOS VPN acceptance is not claimed.
