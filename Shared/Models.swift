@@ -630,6 +630,83 @@ struct AwgSyncApplyRequest: Codable {
     }
 }
 
+// MARK: - Packet transport (QUIC / native+AWG)
+
+/// Response from `GET /localapi/v0/packet-transport` (`ipn.TransportControlStatus`).
+///
+/// Only the fields the app consumes are modeled. The core may report additional
+/// keys (peers, identity, mixed-peer support); Swift's decoder ignores unknown
+/// keys, so a subset is safe and forward-compatible.
+struct TransportControlStatus: Codable {
+    /// The data plane the running engine is currently using.
+    let activeMode: String
+    /// The data plane staged to run after the next backend/tunnel restart.
+    let desiredMode: String
+    /// Whether the staged mode differs from the running mode.
+    let pendingRestart: Bool
+    /// Whether this backend reloads a managed transport profile on restart.
+    /// `ConfigureTransport` is only usable when this is true.
+    let available: Bool
+    let source: String
+    let revision: String
+    let awgConfigured: Bool
+    let warnings: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case activeMode = "active_mode"
+        case desiredMode = "desired_mode"
+        case pendingRestart = "pending_restart"
+        case available
+        case source
+        case revision
+        case awgConfigured = "awg_configured"
+        case warnings
+    }
+
+    /// QUIC data-plane modes. In either mode the separately persisted AWG
+    /// profile is inactive.
+    static let quicModes: Set<String> = ["http3-ip", "quic-ip"]
+
+    /// True when the running or staged data plane is a QUIC carrier.
+    var isQuicSelected: Bool {
+        Self.quicModes.contains(activeMode) || Self.quicModes.contains(desiredMode)
+    }
+}
+
+/// Request body for `POST /localapi/v0/packet-transport`
+/// (`ipn.TransportControlRequest`). The core decodes this with unknown-field
+/// rejection, so only the four fields used by this app are ever serialized.
+struct TransportControlRequest: Codable {
+    let action: String
+    let expectedRevision: String?
+    let mode: String?
+    let awg: AmneziaWGPrefs?
+
+    enum CodingKeys: String, CodingKey {
+        case action
+        case expectedRevision = "expected_revision"
+        case mode
+        case awg
+    }
+
+    /// Select the built-in QUIC (HTTP/3) data plane. The core rewrites `quic`
+    /// to `http3-ip` with auto-trust and clears any saved AWG profile.
+    static func selectQuic(expectedRevision: String) -> TransportControlRequest {
+        TransportControlRequest(action: "mode", expectedRevision: expectedRevision, mode: "quic", awg: nil)
+    }
+
+    /// Return to the native WireGuard data plane with no AWG obfuscation.
+    static func selectNative(expectedRevision: String) -> TransportControlRequest {
+        TransportControlRequest(action: "mode", expectedRevision: expectedRevision, mode: "native", awg: nil)
+    }
+
+    /// Stage native mode and persist an AWG profile in one coordinated core
+    /// operation. Used when switching back from QUIC to native+AWG.
+    static func applyAWG(_ config: AmneziaWGPrefs, expectedRevision: String) -> TransportControlRequest {
+        TransportControlRequest(action: "awg", expectedRevision: expectedRevision, mode: nil, awg: config)
+    }
+}
+
 /// Local prefs subset for AWG configuration check.
 struct LocalPrefs: Codable {
     let AmneziaWG: AmneziaWGPrefs?

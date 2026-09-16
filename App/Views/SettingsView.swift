@@ -17,6 +17,17 @@ struct SettingsView: View {
         appState.localAwgStatus ? .green : .secondary
     }
 
+    private var transportFooterText: String {
+        if !appState.transportAvailable {
+            return "This build does not expose a managed packet transport."
+        }
+        var text = "QUIC wraps WireGuard in built-in HTTP/3 (MASQUE) with an auto-trusted node identity. Enabling it clears the saved Amnezia-WG profile and restarts the tunnel; the Amnezia-WG configuration below is retained for native mode."
+        if appState.transportPendingRestart {
+            text += " A restart is pending to apply the staged mode."
+        }
+        return text
+    }
+
     private var modeSwitchDisabled: Bool {
         appState.pendingWantRunning != nil || appState.isSwitchingNetworkMode || !appState.canUseVPNPermission
     }
@@ -95,6 +106,26 @@ struct SettingsView: View {
                 } else {
                     DisabledSettingsRow(title: "Taildrop", systemImage: "arrow.up.arrow.down.circle")
                 }
+            }
+
+            Section {
+                Toggle(isOn: Binding(
+                    get: { appState.isQuicTransportEnabled },
+                    set: { appState.requestQuicTransport($0) }
+                )) {
+                    HStack {
+                        SettingsRowLabel(title: "QUIC (built-in H3)", systemImage: "bolt.horizontal.circle", color: .purple)
+                        if appState.isAnyAwgOperationInProgress {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+                .disabled(!appState.transportAvailable || appState.isAnyAwgOperationInProgress)
+            } header: {
+                Text("Packet Transport")
+            } footer: {
+                Text(transportFooterText)
             }
 
             Section("Amnezia-WG") {
@@ -198,6 +229,7 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .task {
             appState.loadAwgStatusIfNeeded()
+            await appState.refreshTransportStatus()
         }
     }
 }

@@ -361,4 +361,84 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(NotifyWatchOpt.defaultMask & NotifyWatchOpt.rateLimitNetmaps, 0)
         XCTAssertNotEqual(NotifyWatchOpt.defaultMask & NotifyWatchOpt.peerChanges, 0)
     }
+
+    // MARK: - Packet Transport (QUIC / native+AWG)
+
+    func testTransportControlStatusDecodesSnakeCaseAndIgnoresUnknownKeys() throws {
+        // Mirrors ipn.TransportControlStatus with QUIC staged over a running
+        // native engine, plus keys this app does not model (peers, identity).
+        let json = """
+        {
+            "active_mode": "native",
+            "desired_mode": "http3-ip",
+            "pending_restart": true,
+            "available": true,
+            "source": "managed",
+            "revision": "7",
+            "server": false,
+            "awg_configured": false,
+            "mixed_peer_support": false,
+            "peers": [],
+            "identity": {"public_key": "abc", "spki_sha256": "def"},
+            "warnings": ["Selecting QUIC clears saved AWG settings"]
+        }
+        """.data(using: .utf8)!
+
+        let status = try JSONDecoder().decode(TransportControlStatus.self, from: json)
+        XCTAssertEqual(status.activeMode, "native")
+        XCTAssertEqual(status.desiredMode, "http3-ip")
+        XCTAssertTrue(status.pendingRestart)
+        XCTAssertTrue(status.available)
+        XCTAssertEqual(status.source, "managed")
+        XCTAssertEqual(status.revision, "7")
+        XCTAssertFalse(status.awgConfigured)
+        XCTAssertEqual(status.warnings?.count, 1)
+        XCTAssertTrue(status.isQuicSelected)
+    }
+
+    func testTransportControlStatusQuicModeMapping() throws {
+        func status(active: String, desired: String) throws -> TransportControlStatus {
+            let json = """
+            {"active_mode":"\(active)","desired_mode":"\(desired)","pending_restart":false,"available":true,"source":"managed","revision":"1","awg_configured":false}
+            """.data(using: .utf8)!
+            return try JSONDecoder().decode(TransportControlStatus.self, from: json)
+        }
+        XCTAssertFalse(try status(active: "native", desired: "native").isQuicSelected)
+        XCTAssertTrue(try status(active: "http3-ip", desired: "http3-ip").isQuicSelected)
+        XCTAssertTrue(try status(active: "quic-ip", desired: "quic-ip").isQuicSelected)
+        // A staged-but-not-yet-running QUIC selection still counts as selected.
+        XCTAssertTrue(try status(active: "native", desired: "http3-ip").isQuicSelected)
+    }
+
+    func testTransportRequestSelectQuicEncodesOnlyKnownFields() throws {
+        let request = TransportControlRequest.selectQuic(expectedRevision: "5")
+        let data = try JSONEncoder().encode(request)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["action"] as? String, "mode")
+        XCTAssertEqual(object["mode"] as? String, "quic")
+        XCTAssertEqual(object["expected_revision"] as? String, "5")
+        // The core rejects unknown fields; nil optionals must be omitted, and
+        // no AWG payload is sent when selecting QUIC.
+        XCTAssertNil(object["awg"])
+        XCTAssertNil(object["server"])
+        XCTAssertNil(object["auto_trust"])
+        XCTAssertNil(object["peer"])
+        XCTAssertNil(object["public_key"])
+        XCTAssertEqual(object.keys.count, 3)
+    }
+
+    func testTransportRequestApplyAWGEmbedsCanonicalConfigAndStagesNative() throws {
+        let config = AmneziaWGPrefs(JC: 5, JMin: 40, JMax: 70, S1: 20, S2: 20)
+        let request = TransportControlRequest.applyAWG(config, expectedRevision: "9")
+        let data = try JSONEncoder().encode(request)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["action"] as? String, "awg")
+        XCTAssertEqual(object["expected_revision"] as? String, "9")
+        // The core's "awg" action stages native mode itself; no mode is sent.
+        XCTAssertNil(object["mode"])
+        let awg = try XCTUnwrap(object["awg"] as? [String: Any])
+        XCTAssertEqual(awg["JC"] as? Int, 5)
+        XCTAssertEqual(awg["JMin"] as? Int, 40)
+        XCTAssertEqual(awg["S1"] as? Int, 20)
+    }
 }

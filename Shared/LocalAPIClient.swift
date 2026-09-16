@@ -292,6 +292,28 @@ struct LocalAPIClient {
         return try resp.decodedBody(AmneziaWGPrefs.self, endpoint: endpoint)
     }
 
+    // MARK: - Packet transport (QUIC / native+AWG)
+
+    /// Reads the managed packet-transport status, including the running mode,
+    /// the staged (desired) mode, whether a restart is pending, and the current
+    /// revision required to stage a change.
+    func transportStatus(timeout: Int = 30000) async throws -> TransportControlStatus {
+        let endpoint = "/localapi/v0/packet-transport"
+        let resp = try await execute("GET", endpoint, nil, timeout, true)
+        return try resp.decodedBody(TransportControlStatus.self, endpoint: endpoint)
+    }
+
+    /// Stages a packet-transport change (QUIC selection or coordinated
+    /// native+AWG). The core only stages a next-start profile; the caller must
+    /// restart the backend/tunnel to activate it. Returns the updated status.
+    @discardableResult
+    func configureTransport(_ request: TransportControlRequest, timeout: Int = 30000) async throws -> TransportControlStatus {
+        let endpoint = "/localapi/v0/packet-transport"
+        let body = try JSONEncoder().encode(request)
+        let resp = try await execute("POST", endpoint, body, timeout, true)
+        return try resp.decodedBody(TransportControlStatus.self, endpoint: endpoint)
+    }
+
     // MARK: - Tailnet Lock
 
     /// Result of the Tailnet-Lock status query.

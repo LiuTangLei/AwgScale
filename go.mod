@@ -1,9 +1,9 @@
 module github.com/LiuTangLei/awgscale-ios
 
-go 1.26.5
+go 1.26.6
 
 require (
-	github.com/LiuTangLei/wireguard-go v0.0.30
+	github.com/LiuTangLei/wireguard-go v0.0.32
 	golang.org/x/crypto v0.54.0
 	golang.org/x/mobile v0.0.0-20260312152759-81488f6aeb60
 	golang.org/x/net v0.56.0
@@ -13,9 +13,11 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
+	github.com/andybalholm/brotli v1.1.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
 	github.com/creachadair/msync v0.8.1 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
+	github.com/flynn/noise v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gaissmai/bart v0.26.1 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
@@ -30,6 +32,9 @@ require (
 	github.com/mdlayher/socket v0.5.0 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/pires/go-proxyproto v0.8.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
+	github.com/quic-go/quic-go v0.62.0 // indirect
+	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
@@ -52,4 +57,9 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )
 
-replace tailscale.com => github.com/LiuTangLei/tailscale v1.102.3-0.20260806105338-254cbfd5de28
+replace tailscale.com => github.com/LiuTangLei/tailscale v1.102.5-0.20260916181858-1f00235ed2ce
+
+// The published core pins WG-over-QUIC/H3 to the Tailscale-maintained quic-go
+// fork. A dependency-level replace does not apply to this main module, so the
+// same mapping must be declared here at the top level for release builds.
+replace github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go v0.62.0-tailscale.4

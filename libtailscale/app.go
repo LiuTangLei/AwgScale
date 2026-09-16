@@ -36,6 +36,8 @@ import (
 	"tailscale.com/util/syspolicy/setting"
 	"tailscale.com/wgengine"
 	"tailscale.com/wgengine/netstack"
+	"tailscale.com/wgengine/transportprofile"
+	"tailscale.com/wgengine/wgtransport"
 )
 
 // App is the concrete iOS libtailscale runtime.
@@ -247,17 +249,45 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 		SetBoth:           a.tunnelConfigMgr.onConfigUpdate,
 		GetBaseConfigFunc: b.getDNSBaseConfig,
 	}
+
+	// Load the daemon-managed packet-transport profile before starting the
+	// engine so a staged QUIC (built-in HTTP/3) or native+AWG selection becomes
+	// the running mode on this restart. varRoot lives in the shared AppGroup
+	// container (same path for the app-login backend and the packet tunnel), so
+	// the staged selection persists across restarts and is visible to whichever
+	// process activates it. An absolute varRoot plus TransportManaged is what
+	// makes LocalBackend.ConfigureTransport available to LocalAPI clients.
+	varRoot := dataDir
+	transport := wgtransport.Config{}
+	transportSource, transportRevision := "", "0"
+	transportManaged := transport.Mode == "" && transport.Factory == nil
+	if transportManaged && os.Getenv("TS_EXPERIMENTAL_WG_TRANSPORT") == "" {
+		var loadErr error
+		transport, transportRevision, loadErr = transportprofile.LoadForStart(varRoot)
+		if loadErr != nil {
+			a.closeBackendState(b)
+			return nil, fmt.Errorf("packet transport profile: %w", loadErr)
+		}
+		transportSource = "default"
+		if transportRevision != "0" {
+			transportSource = "managed"
+		}
+	}
 	engine, err := wgengine.NewUserspaceEngine(logf, wgengine.Config{
-		Tun:            b.tunDev,
-		Router:         vf,
-		DNS:            vf,
-		ReconfigureVPN: vf.ReconfigureVPN,
-		Dialer:         dialer,
-		SetSubsystem:   sys.Set,
-		NetMon:         netMon,
-		HealthTracker:  sys.HealthTracker.Get(),
-		Metrics:        sys.UserMetricsRegistry(),
-		EventBus:       sys.Bus.Get(),
+		Tun:               b.tunDev,
+		Router:            vf,
+		DNS:               vf,
+		ReconfigureVPN:    vf.ReconfigureVPN,
+		Dialer:            dialer,
+		SetSubsystem:      sys.Set,
+		NetMon:            netMon,
+		HealthTracker:     sys.HealthTracker.Get(),
+		Metrics:           sys.UserMetricsRegistry(),
+		EventBus:          sys.Bus.Get(),
+		Transport:         transport,
+		TransportSource:   transportSource,
+		TransportRevision: transportRevision,
+		TransportManaged:  transportManaged,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("runBackend: NewUserspaceEngine: %v", err)
@@ -309,6 +339,10 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 		a.closeBackendState(b)
 		return nil, fmt.Errorf("runBackend: NewLocalBackend: %v", err)
 	}
+	// Persist the managed transport profile alongside backend state in the
+	// shared AppGroup container. ConfigureTransport requires an absolute var
+	// root to treat the managed profile as available.
+	lb.SetVarRoot(varRoot)
 	if a.directFileRoot != "" {
 		if err := os.MkdirAll(a.directFileRoot, 0o700); err != nil {
 			log.Printf("taildrop: cannot create direct file root %q: %v", a.directFileRoot, err)

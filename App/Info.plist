@@ -17,14 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-		<string>0.3.0</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
-	</dict>
-	<key>NSCameraUsageDescription</key>
-	<string>Scan Tailnet Lock QR codes to sign devices.</string>
+	<string>1.102.4</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -37,11 +30,18 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-		<string>10</string>
+	<string>11</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan Tailnet Lock QR codes to sign devices.</string>
 	<key>TailscaleAWGVersion</key>
-	<string>1.102.2</string>
+	<string>1.102.4</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>

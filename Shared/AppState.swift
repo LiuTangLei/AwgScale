@@ -313,6 +313,25 @@ class AppState: ObservableObject {
     var isAnyAwgOperationInProgress: Bool {
         isAwgOperationInProgress || isAwgStatusRefreshing
     }
+
+    // MARK: - Packet transport (QUIC / native+AWG)
+
+    /// Running data-plane mode reported by the backend ("native", "http3-ip",
+    /// "quic-ip"). Reflects the engine that is actually running.
+    @Published var transportActiveMode: String = "native"
+    /// Staged data-plane mode that becomes active after the next restart.
+    @Published var transportDesiredMode: String = "native"
+    /// Whether a staged transport change is waiting for a restart to activate.
+    @Published var transportPendingRestart: Bool = false
+    /// Whether this backend exposes a managed packet-transport profile. QUIC
+    /// selection is only offered when true.
+    @Published var transportAvailable: Bool = false
+
+    /// Single UI switch state: the built-in QUIC (HTTP/3) carrier is selected
+    /// when the desired mode is a QUIC mode.
+    var isQuicTransportEnabled: Bool {
+        TransportControlStatus.quicModes.contains(transportDesiredMode)
+    }
     /// Whether AWG peers have been loaded (prevent duplicate requests)
     private var awgPeersLoaded = false
     private var awgPeersLoading = false
@@ -2655,7 +2674,7 @@ class AppState: ObservableObject {
 
         let (client, _) = try await ensureBackendReadyForAwgSync()
         try requireCurrentAwgOperation(operationGeneration)
-        try await client.patchPrefs(.setAmneziaWG(config))
+        try await applyAwgViaCoordinatedTransport(client, config: config)
         try requireCurrentAwgOperation(operationGeneration)
         awgOperationCoordinator.queueRefresh()
 
@@ -2676,6 +2695,129 @@ class AppState: ObservableObject {
         }
 
         awgStatusMessage = config.hasNonDefaultValues ? "AWG config applied successfully" : "AWG config cleared"
+    }
+
+    // MARK: - Packet transport (QUIC)
+
+    /// Reads managed packet-transport status through the active backend and
+    /// publishes it. Safe to call opportunistically; a backend without the
+    /// endpoint simply leaves the published defaults in place.
+    func refreshTransportStatus() async {
+        guard let client = try? await activeLocalAPIClient() else { return }
+        guard let status = try? await client.transportStatus() else { return }
+        applyTransportStatus(status)
+    }
+
+    private func applyTransportStatus(_ status: TransportControlStatus) {
+        transportActiveMode = status.activeMode
+        transportDesiredMode = status.desiredMode
+        transportPendingRestart = status.pendingRestart
+        transportAvailable = status.available
+    }
+
+    /// Selects the built-in QUIC (HTTP/3) carrier or returns to native, then
+    /// restarts the serialized app backend or packet tunnel so the staged mode
+    /// actually runs (verified via stop→start / disconnected→active). Selecting
+    /// QUIC clears any saved AWG profile in the core.
+    func setQuicTransport(_ enabled: Bool) async throws {
+        if let blockReason = awgOperationStartBlockReason(
+            isAnyAwgOperationInProgress: isAnyAwgOperationInProgress,
+            isBackendTransitionInProgress: isBackendTransitionInProgress
+        ) {
+            throw LoginFlowError.localAPI(blockReason)
+        }
+        let operationGeneration = beginAwgOperation()
+        defer { finishAwgOperation(operationGeneration) }
+
+        awgStatusMessage = enabled ? "Enabling QUIC transport..." : "Switching to native transport..."
+
+        let (client, _) = try await ensureBackendReadyForAwgSync()
+        try requireCurrentAwgOperation(operationGeneration)
+
+        let status = try await client.transportStatus()
+        guard status.available else {
+            throw LoginFlowError.localAPI("This build does not expose a managed packet transport.")
+        }
+        let request: TransportControlRequest = enabled
+            ? .selectQuic(expectedRevision: status.revision)
+            : .selectNative(expectedRevision: status.revision)
+        let staged = try await configureTransportWithConflictRetry(client, request)
+        applyTransportStatus(staged)
+        try requireCurrentAwgOperation(operationGeneration)
+        awgOperationCoordinator.queueRefresh()
+
+        // The core clears AWG when QUIC is selected; mirror it locally so the UI
+        // does not show a stale "AWG enabled" state before the refresh lands.
+        if enabled {
+            currentAwgConfig = .empty
+            localAwgStatus = false
+        }
+
+        let restarted = await refreshBackendForAwgConfig()
+        try requireCurrentAwgOperation(operationGeneration)
+
+        await refreshTransportStatus()
+        _ = await loadLocalAwgStatusOnce(
+            showMessages: false,
+            operationGeneration: operationGeneration
+        )
+        try requireCurrentAwgOperation(operationGeneration)
+
+        if !restarted {
+            throw LoginFlowError.localAPI(awgStatusMessage ?? "Network restart failed")
+        }
+
+        awgStatusMessage = enabled ? "QUIC transport enabled" : "Native transport restored"
+    }
+
+    /// Synchronous entry point for the single QUIC toggle in Settings. Launches
+    /// the async transport switch and surfaces failures as an AWG status message
+    /// so the toggle reverts to the backend's actual state.
+    func requestQuicTransport(_ enabled: Bool) {
+        Task { @MainActor in
+            do {
+                try await setQuicTransport(enabled)
+            } catch is CancellationError {
+                // Superseded by a newer operation; the winner owns final state.
+            } catch {
+                awgStatusMessage = error.localizedDescription
+                await refreshTransportStatus()
+            }
+        }
+    }
+
+    /// Persists an AWG profile. When a QUIC data plane is active or staged, the
+    /// core requires a single coordinated operation that stages native mode and
+    /// saves AWG together; otherwise the direct prefs path is used unchanged.
+    private func applyAwgViaCoordinatedTransport(_ client: LocalAPIClient, config: AmneziaWGPrefs) async throws {
+        if let status = try? await client.transportStatus(), status.available, status.isQuicSelected {
+            let staged = try await configureTransportWithConflictRetry(
+                client, .applyAWG(config, expectedRevision: status.revision)
+            )
+            applyTransportStatus(staged)
+        } else {
+            try await client.patchPrefs(.setAmneziaWG(config))
+        }
+    }
+
+    /// Stages a transport change, retrying once if a concurrent revision bump
+    /// caused a 409 conflict.
+    private func configureTransportWithConflictRetry(
+        _ client: LocalAPIClient,
+        _ request: TransportControlRequest
+    ) async throws -> TransportControlStatus {
+        do {
+            return try await client.configureTransport(request)
+        } catch let LocalAPIError.unsuccessfulStatus(statusCode, _, _) where statusCode == 409 {
+            let fresh = try await client.transportStatus()
+            let retried = TransportControlRequest(
+                action: request.action,
+                expectedRevision: fresh.revision,
+                mode: request.mode,
+                awg: request.awg
+            )
+            return try await client.configureTransport(retried)
+        }
     }
 
     // MARK: - AWG Helpers
