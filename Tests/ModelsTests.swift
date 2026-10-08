@@ -3,6 +3,13 @@ import XCTest
 
 final class ModelsTests: XCTestCase {
 
+    @MainActor
+    func testEmbeddedCoreVersionMatchesRelease() {
+        XCTAssertEqual(GoBridge.coreVersion, "1.104.1-t411ee6685")
+        XCTAssertEqual(AppState().tailscaleAwgVersion, GoBridge.coreVersion)
+    }
+
+
     func testAWGReadbackComparesProfileNotOnlyEnabledState() throws {
         let requested = AmneziaWGPrefs(JC: 4, S1: 19, H1: MagicHeaderRange(min: 10, max: 20))
         let same = try JSONDecoder().decode(AmneziaWGPrefs.self, from:
@@ -375,9 +382,8 @@ final class ModelsTests: XCTestCase {
     // MARK: - NotifyWatchOpt
 
     func testDefaultMask() {
-        // Tailscale 1.102 requires PeerChanges for non-Windows updates and
-        // rejects combining it with the legacy RateLimit option.
-        let expected = 8 | 4 | 2 | 64 | 128 | (1 << 12)  // = 4302
+        // Tailscale 1.104 seeds from InitialStatus; bit 3 is obsolete.
+        let expected = (1 << 14) | 4 | 2 | 64 | 128 | (1 << 12)
         XCTAssertEqual(NotifyWatchOpt.defaultMask, expected)
         XCTAssertEqual(NotifyWatchOpt.defaultMask & NotifyWatchOpt.rateLimitNetmaps, 0)
         XCTAssertNotEqual(NotifyWatchOpt.defaultMask & NotifyWatchOpt.peerChanges, 0)

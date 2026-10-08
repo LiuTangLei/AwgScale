@@ -2,6 +2,7 @@ package libtailscale
 
 import (
 	"errors"
+	wgtun "github.com/LiuTangLei/wireguard-go/tun"
 	"os"
 	"testing"
 	"time"
@@ -13,9 +14,9 @@ func TestPendingTUNReadAfterClose(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	bufs := [][]byte{make([]byte, 32)}
-	sizes := []int{0}
-	if _, err := tun.Read(bufs, sizes, 0); !errors.Is(err, os.ErrClosed) {
+	slab := make([]byte, 256)
+	packets := make([]wgtun.ReadPacket, tunBatchSize)
+	if _, err := tun.Read(slab, packets); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("Read after close = %v, want ErrClosed", err)
 	}
 }
@@ -50,12 +51,9 @@ func TestPendingTUNBatchRead(t *testing.T) {
 		}
 	}
 
-	bufs := make([][]byte, 8)
-	sizes := make([]int, 8)
-	for i := range bufs {
-		bufs[i] = make([]byte, 32)
-	}
-	n, err := tun.Read(bufs, sizes, 0)
+	slab := make([]byte, 1024)
+	packets := make([]wgtun.ReadPacket, tunBatchSize)
+	n, err := tun.Read(slab, packets)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -63,11 +61,11 @@ func TestPendingTUNBatchRead(t *testing.T) {
 		t.Fatalf("Read returned %d packets, want >=1", n)
 	}
 	for i := 0; i < n; i++ {
-		if sizes[i] != 3 {
-			t.Errorf("size[%d] = %d, want 3", i, sizes[i])
+		if packets[i].Size != 3 {
+			t.Errorf("size[%d] = %d, want 3", i, packets[i].Size)
 		}
-		if bufs[i][0] != byte(i+1) {
-			t.Errorf("packet[%d][0] = %d, want %d", i, bufs[i][0], i+1)
+		if slab[packets[i].Offset] != byte(i+1) {
+			t.Errorf("packet[%d][0] = %d, want %d", i, slab[packets[i].Offset], i+1)
 		}
 	}
 }
@@ -120,9 +118,9 @@ func TestPendingTUNReadUnblocksOnClose(t *testing.T) {
 	tun := newPendingTUN()
 	done := make(chan error, 1)
 	go func() {
-		bufs := [][]byte{make([]byte, 32)}
-		sizes := []int{0}
-		_, err := tun.Read(bufs, sizes, 0)
+		slab := make([]byte, 256)
+		packets := make([]wgtun.ReadPacket, tunBatchSize)
+		_, err := tun.Read(slab, packets)
 		done <- err
 	}()
 
@@ -148,5 +146,28 @@ func TestPendingTUNEvents(t *testing.T) {
 	case <-tun.Events():
 	case <-time.After(time.Second):
 		t.Fatalf("expected initial Event")
+	}
+}
+
+func TestPendingTUNSlabSpacingAndRetainedPacket(t *testing.T) {
+	dev := newPendingTUN()
+	defer dev.Close()
+	for _, p := range [][]byte{{1, 2, 3}, {4, 5, 6}} {
+		if err := dev.InjectInboundPacket(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	packets := make([]wgtun.ReadPacket, tunBatchSize)
+	// Exactly one packet plus required leading/trailing headroom fits.
+	slab := make([]byte, 2*wgtun.ReadPacketSpacing+3)
+	for want := byte(1); want <= 4; want += 3 {
+		n, err := dev.Read(slab, packets)
+		if err != nil || n != 1 {
+			t.Fatalf("Read = %d, %v", n, err)
+		}
+		p := packets[0]
+		if p.Offset != wgtun.ReadPacketSpacing || p.Size != 3 || slab[p.Offset] != want {
+			t.Fatalf("packet = %+v bytes = %v", p, slab[p.Offset:p.Offset+p.Size])
+		}
 	}
 }

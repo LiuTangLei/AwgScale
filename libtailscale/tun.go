@@ -25,6 +25,9 @@ type pendingTUN struct {
 	closeMu  sync.RWMutex
 	isClosed bool
 
+	readMu  sync.Mutex
+	pending []byte
+
 	packetMu sync.RWMutex
 	packetCB PacketCallback
 
@@ -45,19 +48,53 @@ func newPendingTUN() *pendingTUN {
 
 func (t *pendingTUN) File() *os.File { return nil }
 
-func (t *pendingTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (t *pendingTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	t.readMu.Lock()
+	defer t.readMu.Unlock()
 	if t.closedNow() {
 		return 0, os.ErrClosed
 	}
-	select {
-	case <-t.closed:
-		return 0, os.ErrClosed
-	case packet, ok := <-t.inbound:
-		if !ok || t.closedNow() {
-			return 0, os.ErrClosed
-		}
-		return t.readBatch(packet, bufs, sizes, offset)
+	if len(packets) == 0 || len(slab) < 2*tun.ReadPacketSpacing {
+		return 0, io.ErrShortBuffer
 	}
+	n, offset := 0, tun.ReadPacketSpacing
+	for n < len(packets) {
+		if t.pending == nil {
+			if n == 0 {
+				select {
+				case <-t.closed:
+					return 0, os.ErrClosed
+				case p, ok := <-t.inbound:
+					if !ok || t.closedNow() {
+						return 0, os.ErrClosed
+					}
+					t.pending = p
+				}
+			} else {
+				select {
+				case p, ok := <-t.inbound:
+					if !ok || t.closedNow() {
+						return n, nil
+					}
+					t.pending = p
+				default:
+					return n, nil
+				}
+			}
+		}
+		if len(t.pending) > len(slab)-offset-tun.ReadPacketSpacing {
+			if n == 0 {
+				return 0, tun.ErrTooManySegments
+			}
+			return n, nil
+		}
+		size := copy(slab[offset:], t.pending)
+		packets[n] = tun.ReadPacket{Offset: offset, Size: size}
+		offset += size + tun.ReadPacketSpacing
+		t.pending = nil
+		n++
+	}
+	return n, nil
 }
 
 func (t *pendingTUN) Write(bufs [][]byte, offset int) (int, error) {
@@ -152,40 +189,6 @@ func (t *pendingTUN) logInboundQueueFull(packetBytes int) {
 	if shouldLog {
 		log.Printf("TUN inbound queue full; dropping packet packetBytes=%d queueDepth=%d dropped=%d", packetBytes, len(t.inbound), dropped)
 	}
-}
-
-func (t *pendingTUN) readBatch(first []byte, bufs [][]byte, sizes []int, offset int) (int, error) {
-	if len(bufs) == 0 || len(sizes) < len(bufs) {
-		return 0, io.ErrShortBuffer
-	}
-	if err := copyPacket(bufs[0], sizes, 0, first, offset); err != nil {
-		return 0, err
-	}
-	n := 1
-	for n < len(bufs) {
-		select {
-		case packet, ok := <-t.inbound:
-			if !ok || t.closedNow() {
-				return n, nil
-			}
-			if err := copyPacket(bufs[n], sizes, n, packet, offset); err != nil {
-				return n, err
-			}
-			n++
-		default:
-			return n, nil
-		}
-	}
-	return n, nil
-}
-
-func copyPacket(dst []byte, sizes []int, index int, packet []byte, offset int) error {
-	if offset < 0 || len(dst) < offset+len(packet) {
-		return io.ErrShortBuffer
-	}
-	copy(dst[offset:], packet)
-	sizes[index] = len(packet)
-	return nil
 }
 
 func (t *pendingTUN) closedNow() bool {

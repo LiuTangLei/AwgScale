@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	wgtun "github.com/LiuTangLei/wireguard-go/tun"
 	"tailscale.com/ipn"
 )
 
@@ -164,18 +165,17 @@ func TestPendingTUNInjectRead(t *testing.T) {
 		t.Fatalf("InjectInboundPacket: %v", err)
 	}
 
-	bufs := [][]byte{make([]byte, 64)}
-	sizes := []int{0}
-	n, err := tun.Read(bufs, sizes, 4)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
+	slab := make([]byte, 256)
+	packets := make([]wgtun.ReadPacket, tunBatchSize)
+	n, err := tun.Read(slab, packets)
+	if err != nil || n != 1 {
+		t.Fatalf("Read = %d, %v", n, err)
 	}
-	if n != 1 {
-		t.Fatalf("Read returned %d, want 1", n)
+	p := packets[0]
+	if p.Size != len(packet) || string(slab[p.Offset:p.Offset+p.Size]) != string(packet) {
+		t.Fatalf("Read packet = %+v, want %v", p, packet)
 	}
-	if sizes[0] != len(packet) || string(bufs[0][4:4+sizes[0]]) != string(packet) {
-		t.Fatalf("Read packet = %v size %d, want %v", bufs[0][4:4+sizes[0]], sizes[0], packet)
-	}
+
 }
 
 func TestPendingTUNWriteCallback(t *testing.T) {

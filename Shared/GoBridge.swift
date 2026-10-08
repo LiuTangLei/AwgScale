@@ -10,6 +10,8 @@ import Foundation
 import Libtailscale
 
 enum GoBridge {
+    static var coreVersion: String { LibtailscaleCoreVersion() }
+
     /// The running Go Application instance, set after start().
     private(set) static var application: (any LibtailscaleApplicationProtocol)?
     /// Retain the AppContext so it's not deallocated while Go holds a reference.
@@ -230,6 +232,7 @@ class GoPacketCallback: NSObject, LibtailscalePacketCallbackProtocol {
 // MARK: - Stub Implementation (no Libtailscale.xcframework)
 
 enum GoBridge {
+    static var coreVersion: String { "unavailable (UI stub)" }
     static var application: AnyObject? { nil }
 
     static func start(dataDir: String, directFileRoot: String, hwAttestation: Bool, appLogin: Bool = false) -> Bool {
@@ -343,7 +346,7 @@ struct NotifyWatchOpt {
     static let engineUpdates       = 1
     static let initialState        = 2
     static let prefs               = 4
-    static let netmap              = 8
+    static let initialStatus       = 1 << 14
     static let noPrivateKey        = 16
     static let initialTailFSShares = 32
     static let initialOutgoingFiles = 64
@@ -351,11 +354,8 @@ struct NotifyWatchOpt {
     static let rateLimitNetmaps    = 256
     static let peerChanges         = 1 << 12
 
-    /// Default mask for the iOS notification subscription. Since Tailscale
-    /// 1.102, non-Windows clients receive peer updates through PeerChanges;
-    /// RateLimit is intentionally omitted because upstream declares these two
-    /// options incompatible. The Go bridge converts each delta into the full
-    /// NetworkMap snapshot shared by the app and PacketTunnel processes.
+    /// Tailscale 1.104 delivers initial status and peer deltas. The Go bridge
+    /// converts these into the complete NetworkMap consumed by both processes.
     static let defaultMask =
-        netmap | prefs | initialState | initialHealthState | initialOutgoingFiles | peerChanges
+        initialStatus | prefs | initialState | initialHealthState | initialOutgoingFiles | peerChanges
 }

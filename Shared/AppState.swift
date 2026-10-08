@@ -374,7 +374,7 @@ class AppState: ObservableObject {
     }
 
     var tailscaleAwgVersion: String {
-        Bundle.main.infoDictionary?["TailscaleAWGVersion"] as? String ?? "unknown"
+        GoBridge.coreVersion
     }
 
     var taildropPromptMessage: String {

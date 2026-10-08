@@ -229,7 +229,7 @@ func TestEnsureCurrentDERPMapDoesNotLeaveStaleSourceInstalled(t *testing.T) {
 
 func testDERPMap(hostname string) *tailcfg.DERPMap {
 	return &tailcfg.DERPMap{
-		Regions: map[int]*tailcfg.DERPRegion{
+		Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{
 			1001: {
 				RegionID:   1001,
 				RegionCode: "ctl2",

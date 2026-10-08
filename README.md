@@ -6,9 +6,9 @@ AwgScale is independent software — not affiliated with, sponsored by, or appro
 
 ---
 
-## 1.102.4 QUIC preview
+## 1.104.1 preview
 
-[Download the 1.102.4 preview](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.102.4).
+[Download the 1.104.1 preview](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.104.1).
 The Settings screen has one **QUIC** choice; HTTP/3 is its built-in carrier, not
 a separate selection. QUIC carries native IP directly, not WireGuard packets.
 
@@ -20,11 +20,14 @@ Existing App Group, Keychain, package identifiers and native AWG v2/v3 support
 are preserved. All communicating peers need compatible active modes.
 
 The IPA is **ad-hoc/TrollStore-oriented**, not Apple distribution-signed or an
-App Store/TestFlight release. The two-slice Go framework and device IPA build
-completed; the final simulator suite passed **97 tests**. A physical iOS device
-was not available, so system-VPN QUIC traffic and real-device activation are
-still pending field validation. The preview is not marked stable for that reason.
-See [implementation and verification notes](docs/quic-1.102.4-work-report.md).
+App Store/TestFlight release. This release embeds the published fork core
+1.104.1 and WireGuard fork 0.0.34. The iOS bridge adapts the new shared-buffer
+TUN API and the new initial-status/peer notification API, preserving the
+complete network snapshot consumed by the app and its extension.
+
+The preview remains experimental: simulator checks do not validate system-VPN
+traffic on a physical iOS device. Release assets include the build manifest
+and verification report with the exact completed checks and limitations.
 
 ## Which install method are you using?
 
@@ -77,13 +80,12 @@ xcodebuild build -project AwgScale.xcodeproj -scheme AwgScale \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-`build_go.sh` verifies that the framework resolves
-`github.com/LiuTangLei/tailscale` at immutable corrected-1.102.4 source
-`1f00235ed2ce`, `github.com/LiuTangLei/wireguard-go v0.0.32`, and the published
-`github.com/LiuTangLei/quic-go v0.62.0-tailscale.4` before compiling.
-The Go pseudo-version begins with `v1.102.5-0` solely to pin the exact commit;
-it is not an upgrade to an upstream 1.102.5 release. `GOWORK=off` prevents ambient
-local source replacements. This runtime supports native AWG v2/v3 and QUIC.
+`build_go.sh` verifies the published dependencies before compiling:
+`github.com/LiuTangLei/tailscale v1.104.1`,
+`github.com/LiuTangLei/wireguard-go v0.0.34`, and
+`github.com/LiuTangLei/quic-go v0.63.0-tailscale.1.0.20260929072415-cda3ed094749`.
+It uses Go 1.27.1 and matching gomobile/gobind tools. `GOWORK=off` prevents
+ambient local source replacements. Native AWG v2/v3 and QUIC remain supported.
 
 App-only UI can be developed in the Simulator. The system VPN tunnel requires a device with a valid Network Extension entitlement.
 

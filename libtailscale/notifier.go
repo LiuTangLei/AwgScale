@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 
 	"tailscale.com/ipn"
+	"tailscale.com/types/netmap"
 )
 
 func (app *App) WatchNotifications(mask int, cb NotificationCallback) NotificationManager {
@@ -31,25 +32,16 @@ func (app *App) WatchNotifications(mask int, cb NotificationCallback) Notificati
 			}
 		}()
 
-		// Tailscale 1.102 keeps peers in LocalBackend's live node map. Even on
-		// Apple platforms, where the legacy Notify.NetMap is still emitted, its
-		// embedded Peers slice can therefore be stale or empty. AwgScale's app and
-		// Network Extension IPC contract intentionally shares one complete
-		// NetworkMap snapshot, so replace both legacy NetMap notifications and
-		// peer deltas with the authoritative live view.
+		// Keep the app/extension snapshot contract while subscribing to the
+		// upstream 1.104 status and peer-delta API.
+		var snapshot *netmap.NetworkMap
 		if notifyNeedsCompleteNetMapSnapshot(notify) {
-			if nm := backend.NetMapWithPeers(); nm != nil {
-				copy := *notify
-				copy.NetMap = nm
-				notify = &copy
+			snapshot = backend.NetMapWithPeers()
+			if snapshot != nil {
+				app.refreshUsableDERPMapForLocalAPI("netmap-notify")
 			}
 		}
-
-		if notify.NetMap != nil {
-			app.refreshUsableDERPMapForLocalAPI("netmap-notify")
-		}
-
-		b, err := json.Marshal(notify)
+		b, err := marshalNotification(notify, snapshot)
 		if err != nil {
 			log.Printf("WatchNotifications: marshal: %s", err)
 			return true
@@ -64,11 +56,18 @@ func (app *App) WatchNotifications(mask int, cb NotificationCallback) Notificati
 }
 
 func notifyNeedsCompleteNetMapSnapshot(notify *ipn.Notify) bool {
-	return notify != nil && (notify.NetMap != nil ||
+	return notify != nil && (notify.InitialStatus != nil ||
 		notify.SelfChange != nil ||
 		len(notify.PeersChanged) != 0 ||
 		len(notify.PeersRemoved) != 0 ||
 		len(notify.UserProfiles) != 0)
+}
+
+func marshalNotification(notify *ipn.Notify, snapshot *netmap.NetworkMap) ([]byte, error) {
+	return json.Marshal(struct {
+		*ipn.Notify
+		NetMap *netmap.NetworkMap `json:",omitempty"`
+	}{notify, snapshot})
 }
 
 type notificationManager struct {

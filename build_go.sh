@@ -19,10 +19,10 @@ cd "$SCRIPT_DIR"
 # Release builds must use the versioned forks in go.mod, never an ambient
 # parent workspace that happens to contain unreleased protocol changes.
 export GOWORK=off
-# The published core requires Go >= 1.26.6 and is validated against 1.26.6.
+# The published core requires Go >= 1.27.1 and is validated against 1.27.1.
 # Pin the toolchain so gomobile/gobind and every `go` invocation below build
 # with the same compiler used to qualify the release.
-export GOTOOLCHAIN=go1.26.6
+export GOTOOLCHAIN=go1.27.1
 # Keep caller-provided build flags, but make dependency resolution immutable.
 # Appending makes this the effective -mod value if GOFLAGS already contains one.
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-mod=readonly"
@@ -53,7 +53,7 @@ esac
 
 # Refuse to produce an AwgScale framework from upstream Tailscale or a
 # different WireGuard module by accident. These are the AWG v2/v3-compatible
-# forks selected by this app's go.mod. The Tailscale pseudo-version carries the
+# forks selected by this app's go.mod. The published Tailscale tag carries the
 # published packet-transport engine (native/AWG plus built-in QUIC HTTP/3) used
 # by this release; QUIC is pinned to the Tailscale-maintained quic-go fork.
 TAILSCALE_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' tailscale.com)"
@@ -64,18 +64,18 @@ QUICGO_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}
 QUICGO_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/quic-go/quic-go)"
 
 if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
-      "$TAILSCALE_VERSION" != "v1.102.5-0.20260916181858-1f00235ed2ce" ]]; then
-    echo "error: expected github.com/LiuTangLei/tailscale v1.102.5-0.20260916181858-1f00235ed2ce, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+      "$TAILSCALE_VERSION" != "v1.104.1" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.104.1, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
     exit 1
 fi
 if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||
-      "$WIREGUARD_VERSION" != "v0.0.32" ]]; then
-    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.32, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
+      "$WIREGUARD_VERSION" != "v0.0.34" ]]; then
+    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.34, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
     exit 1
 fi
 if [[ "$QUICGO_SOURCE" != "github.com/LiuTangLei/quic-go" ||
-      "$QUICGO_VERSION" != "v0.62.0-tailscale.4" ]]; then
-    echo "error: expected github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go v0.62.0-tailscale.4, got $QUICGO_SOURCE $QUICGO_VERSION" >&2
+      "$QUICGO_VERSION" != "v0.63.0-tailscale.1.0.20260929072415-cda3ed094749" ]]; then
+    echo "error: expected github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go v0.63.0-tailscale.1.0.20260929072415-cda3ed094749, got $QUICGO_SOURCE $QUICGO_VERSION" >&2
     exit 1
 fi
 echo "Using $TAILSCALE_SOURCE $TAILSCALE_VERSION"
@@ -83,21 +83,23 @@ echo "Using $WIREGUARD_SOURCE $WIREGUARD_VERSION"
 echo "Using $QUICGO_SOURCE $QUICGO_VERSION (github.com/quic-go/quic-go)"
 
 MOBILE_VERSION="$(go list -m -f '{{.Version}}' golang.org/x/mobile)"
-GOBIN_DIR="$(go env GOBIN)"
-if [[ -z "$GOBIN_DIR" ]]; then
-    GOBIN_DIR="$(go env GOPATH)/bin"
-fi
-export PATH="$GOBIN_DIR:$PATH"
+# Other platform builds can require another x/mobile version concurrently.
+# Keep this project's bridge tools isolated from the user's global GOBIN.
+export GOBIN="$SCRIPT_DIR/build/go/bin"
+mkdir -p "$GOBIN"
+export PATH="$GOBIN:$PATH"
 
 # Ensure gomobile and gobind are available, pinned to the x/mobile version in go.mod.
-if ! command -v gomobile &>/dev/null || ! command -v gobind &>/dev/null; then
+if [[ ! -x "$GOBIN/gomobile" || ! -x "$GOBIN/gobind" ]] ||
+   ! go version -m "$(command -v gomobile)" | grep -Fq "$MOBILE_VERSION" ||
+   ! go version -m "$(command -v gobind)" | grep -Fq "$MOBILE_VERSION"; then
     echo "gomobile or gobind not found. Installing golang.org/x/mobile ${MOBILE_VERSION}..."
-    go install "golang.org/x/mobile/cmd/gomobile@${MOBILE_VERSION}"
-    go install "golang.org/x/mobile/cmd/gobind@${MOBILE_VERSION}"
+    go install golang.org/x/mobile/cmd/gomobile
+    go install golang.org/x/mobile/cmd/gobind
 fi
 
-# Initialize gomobile for iOS/Xcode paths.
-gomobile init
+# iOS bind discovers Xcode itself. Do not run `gomobile init`: it installs
+# gobind@latest (overriding the pin above) and initializes Android OpenAL.
 
 # Clean previous build
 rm -rf "$OUTPUT"
@@ -108,7 +110,7 @@ gomobile bind \
     -target "$TARGET_FLAG" \
     -o "$OUTPUT" \
     -iosversion 15.0 \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.1 -X tailscale.com/version.longStamp=1.104.1-t411ee6685 -X tailscale.com/version.gitCommitStamp=411ee6685253069b5a3b496ab14c98e5b2f82afb" \
     ./libtailscale
 
 # Some gomobile/Xcode combinations emit framework Info.plist files with
