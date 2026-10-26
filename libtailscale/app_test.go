@@ -8,9 +8,12 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	wgtun "github.com/LiuTangLei/wireguard-go/tun"
 	"tailscale.com/ipn"
+	"tailscale.com/net/netmon"
+	"tailscale.com/util/eventbus/eventbustest"
 )
 
 type testAppContext struct {
@@ -249,6 +252,55 @@ func TestAppStopIdempotentWithoutBackend(t *testing.T) {
 	a := &App{cancel: func() {}}
 	a.Stop()
 	a.Stop()
+}
+
+func TestAppNetworkChangedForcesMonitorNotification(t *testing.T) {
+	mon, err := netmon.New(eventbustest.NewBus(t), t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make(chan struct{}, 8)
+	unregister := mon.RegisterChangeCallback(func(*netmon.ChangeDelta) {
+		select {
+		case changes <- struct{}{}:
+		default:
+		}
+	})
+	defer unregister()
+	a := &App{backendState: &backend{netMon: mon}}
+	defer a.Stop()
+	mon.Start()
+	// Both updates must reach the core even though the interface snapshot
+	// need not change. Poll() instead of InjectEvent() would suppress these.
+	for range 2 {
+		a.NetworkChanged()
+		select {
+		case <-changes:
+		case <-time.After(3 * time.Second):
+			t.Fatal("platform path update did not notify network monitor")
+		}
+	}
+	a.Stop()
+	a.NetworkChanged() // a late platform callback must ignore the stopped backend.
+}
+
+func TestAppNetworkChangedBeforeBackendAndDuringStop(t *testing.T) {
+	a := &App{}
+	a.NetworkChanged()
+	a.backendState = &backend{}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for range 100 {
+			a.NetworkChanged()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		a.Stop()
+	}()
+	wg.Wait()
 }
 
 func TestAppStopUnblocksReadyWaiters(t *testing.T) {

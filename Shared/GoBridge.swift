@@ -13,7 +13,20 @@ enum GoBridge {
     static var coreVersion: String { LibtailscaleCoreVersion() }
 
     /// The running Go Application instance, set after start().
-    private(set) static var application: (any LibtailscaleApplicationProtocol)?
+    private static let applicationLock = NSLock()
+    private static var runningApplication: (any LibtailscaleApplicationProtocol)?
+    private(set) static var application: (any LibtailscaleApplicationProtocol)? {
+        get {
+            applicationLock.lock()
+            defer { applicationLock.unlock() }
+            return runningApplication
+        }
+        set {
+            applicationLock.lock()
+            runningApplication = newValue
+            applicationLock.unlock()
+        }
+    }
     /// Retain the AppContext so it's not deallocated while Go holds a reference.
     private static var appContext: GoAppContext?
     /// Retain packet callback while Go holds a reference.
@@ -187,10 +200,25 @@ enum GoBridge {
         try app.injectInboundPacket(packet)
     }
 
+    /// Bind asynchronous packet work to this backend, even if a later start
+    /// replaces the process-wide application before that work runs.
+    static func capturePacketHandlers() -> GoPacketHandlers? {
+        guard let app = application else { return nil }
+        return GoPacketHandlers(
+            inject: { try app.injectInboundPacket($0) },
+            refreshUnderlay: { app.rebindUnderlay($0) }
+        )
+    }
+
     /// Tell Darwin netmon which physical interface currently carries underlay traffic.
     static func updateDefaultRouteInterface(_ ifName: String) {
-        GoAppContext.setDefaultRouteInterface(ifName)
         LibtailscaleUpdateLastKnownDefaultRouteInterface(ifName)
+    }
+
+    /// Notify even when the interface name is unchanged: addresses, reachability
+    /// and the network behind that interface may have changed.
+    static func networkChanged() {
+        application?.networkChanged()
     }
 
     /// Rebind MagicSock's underlay sockets after detecting one-way packet flow.
@@ -291,9 +319,13 @@ enum GoBridge {
         throw GoBridgeError.notImplemented
     }
 
+    static func capturePacketHandlers() -> GoPacketHandlers? { nil }
+
     static func updateDefaultRouteInterface(_ ifName: String) {
         NSLog("[GoBridge] updateDefaultRouteInterface(\(ifName)) — stub")
     }
+
+    static func networkChanged() {}
 
     static func rebindUnderlay(reason: String) {
         NSLog("[GoBridge] rebindUnderlay(\(reason)) — stub")
@@ -310,6 +342,11 @@ enum GoBridge {
 #endif
 
 // MARK: - Shared Types (always available)
+
+struct GoPacketHandlers {
+    let inject: (Data) throws -> Void
+    let refreshUnderlay: (String) -> Void
+}
 
 /// Handle returned by watchNotifications, used to stop the subscription.
 class NotificationHandle {

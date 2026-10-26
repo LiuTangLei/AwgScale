@@ -66,12 +66,3 @@ func (b *backend) getDNSBaseConfig() (config dns.OSConfig, _ error) {
 
 	return config, nil
 }
-
-func (b *backend) platformDNSServers() []netip.Addr {
-	config, err := b.getDNSBaseConfig()
-	if err != nil {
-		log.Printf("platformDNSServers: %v", err)
-		return nil
-	}
-	return append([]netip.Addr(nil), config.Nameservers...)
-}

@@ -918,6 +918,60 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.pendingWantRunning, true)
     }
 
+    func testConnectionToggleDoesNotOverlapAnotherBackendTransition() {
+        for transition in ["connection", "mode", "exit-node"] {
+            let state = AppState(vpnPermissionCapability: false)
+            state.ipnState = .running
+            state.prefs = IpnPrefs(WantRunning: true, ExitNodeID: nil, ExitNodeAllowLANAccess: nil, ControlURL: nil, Hostname: nil)
+            switch transition {
+            case "connection": state.pendingWantRunning = true
+            case "mode": state.isSwitchingNetworkMode = true
+            default: state.isUpdatingExitNode = true
+            }
+
+            state.setWantRunning(false)
+
+            XCTAssertEqual(state.pendingWantRunning, transition == "connection" ? true : nil)
+            XCTAssertEqual(state.prefs?.WantRunning, true)
+            XCTAssertEqual(state.ipnState, .running)
+            XCTAssertEqual(state.lastError, "Wait for the current connection change to finish.")
+        }
+    }
+
+    func testModeChangeDoesNotOverlapExitNodeUpdate() {
+        let state = AppState(vpnPermissionCapability: true)
+        state.usesVPNPermission = false
+        state.isUpdatingExitNode = true
+
+        state.setUsesVPNPermission(true)
+
+        XCTAssertFalse(state.usesVPNPermission)
+        XCTAssertFalse(state.isSwitchingNetworkMode)
+        XCTAssertTrue(state.isUpdatingExitNode)
+        XCTAssertEqual(state.lastError, "Wait for the current connection change to finish.")
+    }
+
+    func testForegroundDoesNotStopBackendOwnedByConnectionTransition() async throws {
+        var stops = 0
+        let backend = AppLoginBackend(runtime: .init(
+            start: {}, stop: { stops += 1 },
+            callLocalAPI: { _, _, _, _, _ in .success(statusCode: 200) },
+            watchNotifications: { _ in NotificationHandle() },
+            stopNotifications: { _ in }
+        ))
+        defer { backend.stop() }
+        try await backend.start { _ in }
+        let state = AppState(vpnPermissionCapability: true, loginBackend: backend)
+        state.usesVPNPermission = true
+        state.isSwitchingNetworkMode = true
+
+        state.foregroundResume(vpnActive: false)
+
+        XCTAssertTrue(backend.isRunning)
+        XCTAssertEqual(stops, 0)
+        XCTAssertTrue(state.isSwitchingNetworkMode)
+    }
+
     func testHandleNotifyInvalidJSON() {
         let state = AppState()
 

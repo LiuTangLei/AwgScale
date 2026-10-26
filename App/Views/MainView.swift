@@ -77,7 +77,7 @@ struct MainView: View {
                             }
                         }
                         Spacer()
-                        if appState.pendingWantRunning != nil {
+                        if appState.isBackendTransitionInProgress {
                             ProgressView()
                                 .scaleEffect(0.8)
                         }
@@ -88,7 +88,7 @@ struct MainView: View {
                             }
                         ))
                         .labelsHidden()
-                        .disabled(appState.pendingWantRunning != nil)
+                        .disabled(appState.isBackendTransitionInProgress)
                     }
 
                     if vpnIsActive {

@@ -74,7 +74,8 @@ final class AppLoginBackend {
                 try requireCurrentAttempt(attempt)
                 try runtime.start()
                 running = true
-                _ = try await callLocalAPI(method: "GET", endpoint: "/localapi/v0/status", timeout: 30000)
+                let status = try await callLocalAPI(method: "GET", endpoint: "/localapi/v0/status", timeout: 30000)
+                try status.requireSuccess(endpoint: "/localapi/v0/status")
                 try requireCurrentAttempt(attempt)
                 guard let handle = runtime.watchNotifications({ [weak self] data in
                     Task { @MainActor in
@@ -125,7 +126,14 @@ final class AppLoginBackend {
     }
 
     func callLocalAPI(method: String, endpoint: String, body: Data? = nil, timeout: Int = 30000, readBody: Bool = true) async throws -> IPCResponse {
-        try await runtime.callLocalAPI(method, endpoint, body, timeout, readBody)
+        try Task.checkCancellation()
+        guard running else { throw AppLoginBackendError.notRunning }
+        let attempt = generation
+        let response = try await runtime.callLocalAPI(method, endpoint, body, timeout, readBody)
+        // An in-flight request may finish after a stop or profile/backend
+        // restart. Its old state must not be published into the new session.
+        try requireCurrentAttempt(attempt)
+        return response
     }
 
     func startLoginInteractive() async throws -> IPCResponse {
@@ -141,6 +149,7 @@ private func fallbackContainerURL() -> URL {
 enum AppLoginBackendError: Error, LocalizedError {
     case startFailed
     case notificationsFailed
+    case notRunning
 
     var errorDescription: String? {
         switch self {
@@ -148,6 +157,8 @@ enum AppLoginBackendError: Error, LocalizedError {
             return "App login backend failed to start"
         case .notificationsFailed:
             return "App login backend did not start notifications"
+        case .notRunning:
+            return "App login backend is not running"
         }
     }
 }

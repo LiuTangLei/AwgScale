@@ -12,18 +12,6 @@ import (
 	"tailscale.com/wgengine/router"
 )
 
-var exitNodePublicDNSServers = []string{
-	"8.8.8.8",
-	"8.8.4.4",
-	"2001:4860:4860::8888",
-	"2001:4860:4860::8844",
-}
-
-var tailscaleServiceDNSServers = map[string]bool{
-	"100.100.100.100":    true,
-	"fd7a:115c:a1e0::53": true,
-}
-
 var coreTunnelRoutes = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
@@ -52,8 +40,8 @@ type tunnelConfigManager struct {
 	mu                        sync.Mutex
 	cb                        TunnelConfigCallback
 	lastConfigJSON            []byte
+	lastConfigDelivered       bool
 	defaultRouteExcludeRoutes func() []netip.Prefix
-	exitNodeDNSServers        func() []netip.Addr
 }
 
 func (m *tunnelConfigManager) setDefaultRouteExcludeRoutes(fn func() []netip.Prefix) {
@@ -72,39 +60,18 @@ func (m *tunnelConfigManager) getDefaultRouteExcludeRoutes() []netip.Prefix {
 	return fn()
 }
 
-func (m *tunnelConfigManager) setExitNodeDNSServers(fn func() []netip.Addr) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.exitNodeDNSServers = fn
-}
-
-func (m *tunnelConfigManager) getExitNodeDNSServers() []string {
-	m.mu.Lock()
-	fn := m.exitNodeDNSServers
-	m.mu.Unlock()
-	if fn == nil {
-		return nil
-	}
-	addrs := fn()
-	servers := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		server := addr.String()
-		if !tailscaleServiceDNSServers[server] {
-			servers = append(servers, server)
-		}
-	}
-	return servers
-}
-
 func (m *tunnelConfigManager) setCallback(cb TunnelConfigCallback) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cb = cb
+	m.lastConfigDelivered = false
 	lastConfigJSON := append([]byte(nil), m.lastConfigJSON...)
 
 	if cb != nil && len(lastConfigJSON) > 0 {
 		if err := cb.OnTunnelConfigUpdate(lastConfigJSON); err != nil {
 			log.Printf("replay tunnel config: %v", err)
+		} else {
+			m.lastConfigDelivered = true
 		}
 	}
 }
@@ -114,6 +81,7 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 		// Tunnel being torn down
 		m.mu.Lock()
 		m.lastConfigJSON = nil
+		m.lastConfigDelivered = false
 		m.mu.Unlock()
 		return nil
 	}
@@ -170,15 +138,9 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 			tc.DNSMatchDomains = append(tc.DNSMatchDomains, d.WithoutTrailingDot())
 		}
 	}
-	if hasDefaultRoute && dnsServersAreTailscaleServiceIPs(tc.DNSServers) {
-		if platformDNSServers := m.getExitNodeDNSServers(); len(platformDNSServers) > 0 {
-			log.Printf("exit node: using platform DNS servers for NetworkExtension DNS to avoid PeerAPI DNS proxy timeout")
-			tc.DNSServers = platformDNSServers
-		} else {
-			log.Printf("exit node: using public DNS servers for NetworkExtension DNS because platform DNS is unavailable")
-			tc.DNSServers = append([]string(nil), exitNodePublicDNSServers...)
-		}
-	}
+	// Preserve the core's resolver and split-DNS policy even with an exit
+	// node. Replacing its service IP with LAN/public DNS bypasses MagicDNS
+	// and sends private tailnet names to a resolver that cannot answer them.
 
 	log.Printf("tunnel config: localAddrs=%d routes=%d excludeRoutes=%d dnsServers=%d searchDomains=%d matchDomains=%d mtu=%d hasDefaultRoute=%t",
 		len(tc.LocalAddresses),
@@ -196,11 +158,12 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 		return fmt.Errorf("marshal tunnel config: %w", err)
 	}
 	m.mu.Lock()
-	if bytes.Equal(m.lastConfigJSON, configJSON) {
+	if bytes.Equal(m.lastConfigJSON, configJSON) && (m.cb == nil || m.lastConfigDelivered) {
 		m.mu.Unlock()
 		return nil
 	}
 	m.lastConfigJSON = append([]byte(nil), configJSON...)
+	m.lastConfigDelivered = false
 	cb := m.cb
 
 	if cb == nil {
@@ -209,6 +172,9 @@ func (m *tunnelConfigManager) onConfigUpdate(rcfg *router.Config, dcfg *dns.OSCo
 	}
 
 	err = cb.OnTunnelConfigUpdate(configJSON)
+	// Keep the latest config for a new callback, but only deduplicate after
+	// delivery succeeds. A failed callback must not suppress the next retry.
+	m.lastConfigDelivered = err == nil
 	m.mu.Unlock()
 	if err != nil {
 		log.Printf("tunnel config: callback failed: %v", err)
@@ -260,18 +226,6 @@ func appendMissingCoreTunnelRoutes(routes []string) []string {
 		}
 	}
 	return routes
-}
-
-func dnsServersAreTailscaleServiceIPs(servers []string) bool {
-	if len(servers) == 0 {
-		return false
-	}
-	for _, server := range servers {
-		if !tailscaleServiceDNSServers[server] {
-			return false
-		}
-	}
-	return true
 }
 
 // setTunnelConfigCallback is called from the exported SetTunnelConfigCallback.

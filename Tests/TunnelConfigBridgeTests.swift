@@ -3,6 +3,28 @@ import XCTest
 
 final class TunnelConfigBridgeTests: XCTestCase {
 
+    func testDefaultInterfacePreservesSystemPreference() {
+        let interfaces = [
+            TunnelPathInterface(name: "pdp_ip0", isLoopback: false, isUsedByPath: true),
+            TunnelPathInterface(name: "en0", isLoopback: false, isUsedByPath: true),
+        ]
+        XCTAssertEqual(tunnelDefaultRouteInterface(isSatisfied: true, interfaces: interfaces), "pdp_ip0")
+        XCTAssertEqual(tunnelDefaultRouteInterface(isSatisfied: true, interfaces: Array(interfaces.reversed())), "en0")
+    }
+
+    func testDefaultInterfaceExcludesTunnelLoopbackAndUnusedInterfaces() {
+        let interfaces = [
+            TunnelPathInterface(name: "utun4", isLoopback: false, isUsedByPath: true),
+            TunnelPathInterface(name: "lo0", isLoopback: true, isUsedByPath: true),
+            TunnelPathInterface(name: "en0", isLoopback: false, isUsedByPath: false),
+            TunnelPathInterface(name: "pdp_ip0", isLoopback: false, isUsedByPath: true),
+        ]
+        XCTAssertEqual(tunnelDefaultRouteInterface(isSatisfied: true, interfaces: interfaces), "pdp_ip0")
+        XCTAssertNil(tunnelDefaultRouteInterface(isSatisfied: false, interfaces: interfaces))
+        XCTAssertNil(tunnelDefaultRouteInterface(isSatisfied: true, interfaces: []))
+        XCTAssertNil(tunnelDefaultRouteInterface(isSatisfied: true, interfaces: Array(interfaces.dropLast())))
+    }
+
     // MARK: - ipv4PrefixLenToMask
 
     func testIPv4PrefixLenToMaskCommonValues() {

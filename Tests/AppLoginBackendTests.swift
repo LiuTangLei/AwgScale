@@ -52,6 +52,98 @@ private final class LoginBackendRuntimeHarness {
 
 @MainActor
 final class AppLoginBackendTests: XCTestCase {
+    func testReadinessHTTPFailureStopsBackendWithoutSubscribing() async throws {
+        let harness = LoginBackendRuntimeHarness()
+        let backend = AppLoginBackend(runtime: harness.runtime)
+        let start = Task { try await backend.start { _ in } }
+        await harness.gate.waitForRequests(1)
+        await harness.gate.complete(0, result: .success(.success(statusCode: 503)))
+        do {
+            try await start.value
+            XCTFail("HTTP failure must not count as readiness")
+        } catch LocalAPIError.unsuccessfulStatus(let code, _, _) {
+            XCTAssertEqual(code, 503)
+        }
+        XCTAssertFalse(backend.isRunning)
+        XCTAssertEqual(harness.stops, 1)
+        XCTAssertTrue(harness.callbacks.isEmpty)
+    }
+
+    func testStoppedBackendRejectsLocalAPIWithoutCallingRuntime() async {
+        var requests = 0
+        let backend = AppLoginBackend(runtime: .init(
+            start: {}, stop: {},
+            callLocalAPI: { _, _, _, _, _ in
+                requests += 1
+                return .success(statusCode: 200)
+            },
+            watchNotifications: { _ in NotificationHandle() },
+            stopNotifications: { _ in }
+        ))
+        do {
+            _ = try await backend.callLocalAPI(method: "GET", endpoint: "/localapi/v0/prefs")
+            XCTFail("A stopped backend cannot serve LocalAPI requests")
+        } catch AppLoginBackendError.notRunning {
+            // A retained client cannot silently issue work to a different owner.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(requests, 0)
+    }
+
+    func testInFlightLocalAPIResponseCannotCrossBackendGeneration() async throws {
+        let harness = LoginBackendRuntimeHarness()
+        let backend = AppLoginBackend(runtime: harness.runtime)
+        defer { backend.stop() }
+        let firstStart = Task { try await backend.start { _ in } }
+        await harness.gate.waitForRequests(1)
+        await harness.gate.complete(0)
+        try await firstStart.value
+
+        let oldRequest = Task {
+            try await backend.callLocalAPI(method: "GET", endpoint: "/localapi/v0/profiles/current")
+        }
+        await harness.gate.waitForRequests(2)
+        backend.stop()
+        let secondStart = Task { try await backend.start { _ in } }
+        await harness.gate.waitForRequests(3)
+        await harness.gate.complete(2)
+        try await secondStart.value
+        await harness.gate.complete(1)
+        do {
+            _ = try await oldRequest.value
+            XCTFail("The previous session's response must not update the current UI")
+        } catch is CancellationError {
+            // The current backend remains active, but the old response is stale.
+        }
+        XCTAssertTrue(backend.isRunning)
+        XCTAssertEqual(harness.starts, 2)
+        XCTAssertEqual(harness.stops, 1)
+    }
+
+    func testCancelledLocalAPIRequestRejectsLateSuccess() async throws {
+        let harness = LoginBackendRuntimeHarness()
+        let backend = AppLoginBackend(runtime: harness.runtime)
+        defer { backend.stop() }
+        let start = Task { try await backend.start { _ in } }
+        await harness.gate.waitForRequests(1)
+        await harness.gate.complete(0)
+        try await start.value
+        let request = Task {
+            try await backend.callLocalAPI(method: "GET", endpoint: "/localapi/v0/prefs")
+        }
+        await harness.gate.waitForRequests(2)
+        request.cancel()
+        await harness.gate.complete(1)
+        do {
+            _ = try await request.value
+            XCTFail("Cancelled requests must not deliver late state")
+        } catch is CancellationError {
+            // The synchronous Go operation can finish after Swift cancellation.
+        }
+        XCTAssertTrue(backend.isRunning)
+    }
+
     func testConcurrentStartsShareReadiness() async throws {
         let harness = LoginBackendRuntimeHarness()
         let backend = AppLoginBackend(runtime: harness.runtime)

@@ -20,6 +20,21 @@ struct TunnelConfigFromGo: Codable, Equatable {
     let mtu: Int
 }
 
+/// Keep the preference order supplied by NWPath; interface types do not imply
+/// which network iOS is actually using (for example, with Wi-Fi Assist).
+struct TunnelPathInterface {
+    let name: String
+    let isLoopback: Bool
+    let isUsedByPath: Bool
+}
+
+func tunnelDefaultRouteInterface(isSatisfied: Bool, interfaces: [TunnelPathInterface]) -> String? {
+    guard isSatisfied else { return nil }
+    return interfaces.first {
+        $0.isUsedByPath && !$0.isLoopback && !$0.name.isEmpty && !$0.name.hasPrefix("utun")
+    }?.name
+}
+
 /// CIDR prefix length -> IPv4 dotted-decimal subnet mask (e.g. 24 -> "255.255.255.0").
 /// Values outside [0, 32] are clamped.
 func ipv4PrefixLenToMask(_ prefixLen: Int) -> String {

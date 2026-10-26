@@ -2,7 +2,10 @@ package libtailscale
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 
@@ -287,87 +290,56 @@ func TestTunnelConfigPreservesCustomHeadscaleRoutes(t *testing.T) {
 	}
 }
 
-func TestTunnelConfigExitNodeUsesPlatformDNSForTailscaleServiceDNS(t *testing.T) {
+func TestTunnelConfigExitNodePreservesMagicDNS(t *testing.T) {
 	mgr := &tunnelConfigManager{}
-	mgr.setExitNodeDNSServers(func() []netip.Addr {
-		return []netip.Addr{netip.MustParseAddr("192.0.2.53"), netip.MustParseAddr("2001:db8::53")}
-	})
 	cb := &recordingCallback{}
 	mgr.setCallback(cb)
-
 	rc := sampleRouterConfig()
 	rc.Routes = []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/0"),
 		netip.MustParsePrefix("::/0"),
 	}
-	dcfg := &dns.OSConfig{
-		Nameservers: []netip.Addr{
-			netip.MustParseAddr("100.100.100.100"),
-			netip.MustParseAddr("fd7a:115c:a1e0::53"),
-		},
+	dcfg := sampleDNSConfig(t)
+	dcfg.Nameservers = []netip.Addr{
+		netip.MustParseAddr("100.100.100.100"),
+		netip.MustParseAddr("fd7a:115c:a1e0::53"),
 	}
-
 	if err := mgr.onConfigUpdate(rc, dcfg); err != nil {
-		t.Fatalf("onConfigUpdate: %v", err)
+		t.Fatal(err)
 	}
-
-	configs := cb.snapshot()
 	var tc TunnelConfig
-	if err := json.Unmarshal(configs[0], &tc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(cb.snapshot()[0], &tc); err != nil {
+		t.Fatal(err)
 	}
-	if !containsString(tc.Routes, "0.0.0.0/0") || !containsString(tc.Routes, "::/0") {
-		t.Fatalf("Routes = %v, missing default routes", tc.Routes)
+	if !slices.Equal(tc.DNSServers, []string{"100.100.100.100", "fd7a:115c:a1e0::53"}) {
+		t.Fatalf("exit node replaced MagicDNS resolvers: %v", tc.DNSServers)
 	}
-	for _, want := range []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
+	if !slices.Equal(tc.DNSDomains, []string{"example.com"}) || !slices.Equal(tc.DNSMatchDomains, []string{"ts.net"}) {
+		t.Fatalf("exit node changed DNS policy: search=%v match=%v", tc.DNSDomains, tc.DNSMatchDomains)
+	}
+	for _, want := range []string{"0.0.0.0/0", "::/0", "100.64.0.0/10", "fd7a:115c:a1e0::/48"} {
 		if !containsString(tc.Routes, want) {
-			t.Fatalf("Routes = %v, missing core tunnel route %s", tc.Routes, want)
-		}
-	}
-	wantDNS := []string{"192.0.2.53", "2001:db8::53"}
-	if len(tc.DNSServers) != len(wantDNS) {
-		t.Fatalf("DNSServers = %v, want %v", tc.DNSServers, wantDNS)
-	}
-	for i, want := range wantDNS {
-		if tc.DNSServers[i] != want {
-			t.Fatalf("DNSServers = %v, want %v", tc.DNSServers, wantDNS)
+			t.Fatalf("Routes = %v, missing %s", tc.Routes, want)
 		}
 	}
 }
 
-func TestTunnelConfigExitNodeUsesPublicDNSWhenPlatformDNSUnavailable(t *testing.T) {
-	mgr := &tunnelConfigManager{}
-	cb := &recordingCallback{}
-	mgr.setCallback(cb)
-
-	rc := sampleRouterConfig()
-	rc.Routes = []netip.Prefix{
-		netip.MustParsePrefix("0.0.0.0/0"),
-		netip.MustParsePrefix("::/0"),
-	}
-	dcfg := &dns.OSConfig{
-		Nameservers: []netip.Addr{
-			netip.MustParseAddr("100.100.100.100"),
-			netip.MustParseAddr("fd7a:115c:a1e0::53"),
-		},
-	}
-
-	if err := mgr.onConfigUpdate(rc, dcfg); err != nil {
-		t.Fatalf("onConfigUpdate: %v", err)
-	}
-
-	configs := cb.snapshot()
-	var tc TunnelConfig
-	if err := json.Unmarshal(configs[0], &tc); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	wantDNS := []string{"8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"}
-	if len(tc.DNSServers) != len(wantDNS) {
-		t.Fatalf("DNSServers = %v, want %v", tc.DNSServers, wantDNS)
-	}
-	for i, want := range wantDNS {
-		if tc.DNSServers[i] != want {
-			t.Fatalf("DNSServers = %v, want %v", tc.DNSServers, wantDNS)
+func TestTunnelConfigExitNodeDoesNotInventDNS(t *testing.T) {
+	for _, dcfg := range []*dns.OSConfig{nil, {}} {
+		mgr := &tunnelConfigManager{}
+		cb := &recordingCallback{}
+		mgr.setCallback(cb)
+		rc := sampleRouterConfig()
+		rc.Routes = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}
+		if err := mgr.onConfigUpdate(rc, dcfg); err != nil {
+			t.Fatal(err)
+		}
+		var tc TunnelConfig
+		if err := json.Unmarshal(cb.snapshot()[0], &tc); err != nil {
+			t.Fatal(err)
+		}
+		if len(tc.DNSServers) != 0 || len(tc.DNSDomains) != 0 || len(tc.DNSMatchDomains) != 0 {
+			t.Fatalf("invented DNS override: %+v", tc)
 		}
 	}
 }
@@ -446,6 +418,43 @@ func TestTunnelConfigSkipsIdenticalUpdates(t *testing.T) {
 
 	if got := len(cb.snapshot()); got != 1 {
 		t.Fatalf("got %d configs, want one deduplicated update", got)
+	}
+}
+
+func TestTunnelConfigRetriesFailedDelivery(t *testing.T) {
+	for _, replay := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replay=%t", replay), func(t *testing.T) {
+			mgr := &tunnelConfigManager{}
+			failure := errors.New("callback unavailable")
+			cb := &recordingCallback{err: failure}
+			rc := sampleRouterConfig()
+			if replay {
+				if err := mgr.onConfigUpdate(rc, nil); err != nil {
+					t.Fatal(err)
+				}
+				mgr.setCallback(cb)
+			} else {
+				mgr.setCallback(cb)
+				if err := mgr.onConfigUpdate(rc, nil); !errors.Is(err, failure) {
+					t.Fatalf("failed update = %v, want %v", err, failure)
+				}
+			}
+			cb.mu.Lock()
+			cb.err = nil
+			cb.mu.Unlock()
+			if err := mgr.onConfigUpdate(rc, nil); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if got := len(cb.snapshot()); got != 2 {
+				t.Fatalf("delivery attempts = %d, want 2", got)
+			}
+			if err := mgr.onConfigUpdate(rc, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(cb.snapshot()); got != 2 {
+				t.Fatalf("successful config was not deduplicated: %d attempts", got)
+			}
+		})
 	}
 }
 

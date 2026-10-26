@@ -25,7 +25,7 @@ struct SettingsView: View {
     }
 
     private var modeSwitchDisabled: Bool {
-        appState.pendingWantRunning != nil || appState.isSwitchingNetworkMode || !appState.canUseVPNPermission
+        appState.isBackendTransitionInProgress || !appState.canUseVPNPermission
     }
 
     var body: some View {

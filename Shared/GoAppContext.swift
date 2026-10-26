@@ -18,15 +18,6 @@ class GoAppContext: NSObject, LibtailscaleAppContextProtocol {
     private let logger = Logger(subsystem: IPCConstants.appBundleID, category: "go")
     private let keychainGroups = GoAppContext.keychainGroupCandidates()
     private let fallbackPreferences = sharedDefaults ?? UserDefaults.standard
-    private static let dnsLock = NSLock()
-    private static var defaultRouteInterfaceName: String?
-
-    static func setDefaultRouteInterface(_ ifName: String) {
-        dnsLock.lock()
-        defaultRouteInterfaceName = ifName
-        dnsLock.unlock()
-    }
-
     private static func keychainGroupCandidates(includeLegacy: Bool = false) -> [String?] {
         let baseGroup = IPCConstants.keychainGroupID
         var groups: [String?] = ["TROLLSTORE.\(baseGroup)", nil]
@@ -628,6 +619,7 @@ class GoNotificationCallback: NSObject, LibtailscaleNotificationCallbackProtocol
 
 /// Wraps Swift Data as a Go InputStream for passing request bodies to CallLocalAPI.
 class DataInputStream: NSObject, LibtailscaleInputStreamProtocol {
+    private let lock = NSLock()
     private var data: Data?
 
     init(_ data: Data) {
@@ -635,18 +627,23 @@ class DataInputStream: NSObject, LibtailscaleInputStreamProtocol {
     }
 
     func read() throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
         guard let d = data else { return Data() }
         data = nil // consumed
         return d
     }
 
     func close() throws {
+        lock.lock()
+        defer { lock.unlock() }
         data = nil
     }
 }
 
 /// Streams a file into Go's LocalAPI request body without loading it all into IPC memory.
 class FileInputStream: NSObject, LibtailscaleInputStreamProtocol {
+    private let lock = NSLock()
     private var handle: FileHandle?
     private let chunkSize = 256 * 1024
 
@@ -655,17 +652,23 @@ class FileInputStream: NSObject, LibtailscaleInputStreamProtocol {
     }
 
     func read() throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
         guard let handle else { return Data() }
         let data = try handle.read(upToCount: chunkSize) ?? Data()
         if data.isEmpty {
-            try close()
+            self.handle = nil
+            try handle.close()
         }
         return data
     }
 
     func close() throws {
-        try handle?.close()
-        handle = nil
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return }
+        self.handle = nil
+        try handle.close()
     }
 }
 

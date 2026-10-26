@@ -72,7 +72,12 @@ func (app *App) CallLocalAPIMultipart(timeoutMillis int, method, endpoint string
 				resultCh <- fmt.Errorf("CreatePart: %w", err)
 				return
 			}
-			_, err = io.Copy(p, adaptInputStream(part.Body))
+			body := adaptInputStream(part.Body)
+			_, err = io.Copy(p, body)
+			closeErr := body.Close()
+			if err == nil {
+				err = closeErr
+			}
 			if err != nil {
 				resultCh <- fmt.Errorf("Copy: %w", err)
 				return

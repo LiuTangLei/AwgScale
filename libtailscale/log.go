@@ -51,7 +51,11 @@ func (b *backend) setupLogs(logDir string, logID logid.PrivateID, logf logger.Lo
 	logcfg.FlushDelayFn = func() time.Duration { return 2 * time.Minute }
 
 	filchOpts := filch.Options{
-		ReplaceStderr: true,
+		// This backend shares its process with Swift/NetworkExtension (and
+		// XCTest). OSLog can echo logtail output to stderr; capturing fd 2
+		// feeds that output back into filch and swallows host diagnostics.
+		// Explicit logtail writes still use the persistent buffer below.
+		ReplaceStderr: false,
 	}
 
 	var filchErr error

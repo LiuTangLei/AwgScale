@@ -13,7 +13,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private struct TunnelSettingsRequest {
         let settings: NEPacketTunnelNetworkSettings
         let hasDefaultRoute: Bool?
-        let completion: ((Error?) -> Void)?
+    }
+
+    private struct PacketBridgeSession {
+        let generation: UUID
+        let handlers: GoPacketHandlers
     }
 
     private let logger = Logger(subsystem: IPCConstants.appBundleID, category: "tunnel")
@@ -28,11 +32,36 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let packetWriteQueue = DispatchQueue(label: "top.yesican.awgscale.packetflow.write", qos: .userInitiated)
     private let packetStateQueue = DispatchQueue(label: "top.yesican.awgscale.packetflow.state")
     private let packetStateQueueKey = DispatchSpecificKey<Void>()
-    private var packetReadLoopRunning = false
-    private let tunnelSettingsQueue = DispatchQueue(label: "top.yesican.awgscale.tunnel-settings")
-    private var tunnelStopping = false
-    private var tunnelSettingsInFlight = false
-    private var pendingTunnelSettings: TunnelSettingsRequest?
+    private var packetBridgeGeneration: UUID?
+    private var tunnelFailure: Error?
+    private lazy var tunnelSettings: TunnelSettingsCoordinator<TunnelSettingsRequest> = .init(
+        apply: { [weak self] request, completion in
+            guard let self else {
+                completion(TunnelSettingsError.cancelled)
+                return
+            }
+            self.setTunnelNetworkSettings(request.settings, completionHandler: completion)
+        },
+        didApply: { [weak self] request in
+            if let hasDefaultRoute = request.hasDefaultRoute {
+                self?.publishTunnelDefaultRoute(hasDefaultRoute)
+            }
+        },
+        activityChanged: { [weak self] active in self?.reasserting = active },
+        didFail: { [weak self] error, generation in
+            // Go shutdown can wait for callbacks; never run it on the settings queue.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tunnelSettings.isCurrent(generation) else { return }
+                self.tunnelFailure = error
+                self.logger.error("VPN network settings failed: \(error.localizedDescription)")
+                self.publishLastError(error.localizedDescription)
+                self.cleanupStartedBackend()
+                sharedDefaults?.set(false, forKey: IPCConstants.keyTunnelHasDefaultRoute)
+                self.writeSharedState(ipnState: 3)
+                self.cancelTunnelWithError(error)
+            }
+        }
+    )
     private var packetsFromSystem: UInt64 = 0
     private var bytesFromSystem: UInt64 = 0
     private var packetsFromGoCallback: UInt64 = 0
@@ -50,14 +79,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override init() {
         super.init()
         packetStateQueue.setSpecific(key: packetStateQueueKey, value: ())
+        _ = tunnelSettings
     }
 
     // MARK: - Lifecycle
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+        DispatchQueue.main.async { [self] in
+            startTunnelOnMain(options: options, completionHandler: completionHandler)
+        }
+    }
+
+    private func startTunnelOnMain(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         logger.log("startTunnel: beginning")
-        logger.notice("runtime marker awgscale=0.3.0 build=10 recovery=official-soft-refresh-fast30-cd60 refactor=dns-subnet-tka-advertise-routes-mullvad-notifications")
-        resetTunnelLifecycleState()
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        logger.notice("runtime marker awgscale=\(version, privacy: .public) build=\(build, privacy: .public)")
+        let generation = resetTunnelLifecycleState()
         sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
         sharedDefaults?.set(false, forKey: IPCConstants.keyTunnelHasDefaultRoute)
         writeSharedState(ipnState: 4) // IpnState.starting
@@ -101,9 +139,49 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         startPacketBridge()
 
         // 4. Subscribe to WatchNotifications to track state
-        guard let notifyHandle = GoBridge.watchNotifications(mask: NotifyWatchOpt.defaultMask, callback: { [weak self] data in
-            self?.handleNotification(data)
-        }) else {
+        watchBackendNotifications(generation: generation, completionHandler: completionHandler)
+    }
+
+    private func watchBackendNotifications(generation: UUID, completionHandler: @escaping (Error?) -> Void) {
+        let callback: (Data) -> Void = { [weak self] data in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tunnelSettings.isActive(generation) else { return }
+                self.handleNotification(data)
+            }
+        }
+        let subscribe: () -> NotificationHandle?
+        #if canImport(Libtailscale)
+        // Capture before leaving the lifecycle queue. A stopped subscription
+        // must never attach itself to a replacement Go backend.
+        let app = GoBridge.application
+        subscribe = {
+            guard let app else { return nil }
+            let bridgeCallback = GoNotificationCallback(callback)
+            guard let manager = app.watchNotifications(NotifyWatchOpt.defaultMask, cb: bridgeCallback) else { return nil }
+            let handle = NotificationHandle()
+            handle.goManager = manager
+            handle.goCallback = bridgeCallback
+            return handle
+        }
+        #else
+        subscribe = { GoBridge.watchNotifications(mask: NotifyWatchOpt.defaultMask, callback: callback) }
+        #endif
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let handle = subscribe()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.tunnelSettings.isActive(generation) else {
+                    if let handle { GoBridge.stopNotifications(handle) }
+                    completionHandler(TunnelSettingsError.cancelled)
+                    return
+                }
+                self.finishStartingTunnel(handle: handle, generation: generation, completionHandler: completionHandler)
+            }
+        }
+    }
+
+    private func finishStartingTunnel(handle: NotificationHandle?, generation: UUID,
+                                      completionHandler: @escaping (Error?) -> Void) {
+        guard let notifyHandle = handle else {
             logger.error("startTunnel: failed to watch Go backend notifications")
             cleanupStartedBackend()
             completeStartWithError("Go backend did not become ready", code: 4, completionHandler: completionHandler)
@@ -111,29 +189,38 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         self.notifyHandle = notifyHandle
         logger.log("startTunnel: watching notifications")
+        // Path notifications can arrive while the Go backend is still starting.
+        // Replay once it is ready so no handoff in that window is lost.
+        defaultRouteMonitorQueue.async { [weak self] in
+            guard let self, let monitor = self.defaultRouteMonitor else { return }
+            self.publishDefaultRouteInterface(from: monitor.currentPath)
+        }
 
         // 5. Configure initial tunnel settings
         //    Real settings update from Go backend via TunnelConfigCallback.
         let settings = createInitialTunnelSettings()
-        enqueueTunnelSettingsUpdate(settings, hasDefaultRoute: false) { [weak self] error in
+        enqueueTunnelSettingsUpdate(settings, hasDefaultRoute: false, generation: generation) { [weak self] error in
             if let error = error {
-                self?.logger.error("startTunnel: setTunnelNetworkSettings failed: \(error.localizedDescription)")
-                self?.publishLastError("setTunnelNetworkSettings failed: \(error.localizedDescription)")
-                self?.cleanupStartedBackend()
                 completionHandler(error)
                 return
             }
-            guard let self = self, !self.isTunnelStopping() else {
-                completionHandler(nil)
+            guard let self, self.tunnelSettings.isActive(generation) else {
+                completionHandler(TunnelSettingsError.cancelled)
                 return
             }
             self.logger.log("startTunnel: initial tunnel settings applied")
-            self.registerTunnelConfigCallback()
+            self.registerTunnelConfigCallback(generation: generation)
             completionHandler(nil)
         }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async { [self] in
+            stopTunnelOnMain(with: reason, completionHandler: completionHandler)
+        }
+    }
+
+    private func stopTunnelOnMain(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         logger.log("stopTunnel: reason=\(String(describing: reason))")
         markTunnelStopping()
 
@@ -152,7 +239,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Write disconnected state to shared defaults
         sharedDefaults?.set(false, forKey: IPCConstants.keyTunnelHasDefaultRoute)
-        sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
+        if tunnelFailure == nil {
+            sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
+        }
         writeSharedState(ipnState: 3) // IpnState.stopped
 
         completionHandler()
@@ -161,15 +250,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Tunnel Config from Go Backend
 
     /// Called by Go when router.Config or dns.OSConfig changes.
-    private func handleTunnelConfigUpdate(_ configJSON: Data) {
-        guard !isTunnelStopping() else { return }
+    private func handleTunnelConfigUpdate(_ configJSON: Data, generation: UUID) {
+        guard tunnelSettings.isActive(generation) else { return }
         do {
             let config = try JSONDecoder().decode(TunnelConfigFromGo.self, from: configJSON)
             let settings = buildTunnelSettings(from: config)
             let hasDefaultRoute = tunnelConfigHasDefaultRoute(config.routes)
-            updateTunnelSettings(settings, hasDefaultRoute: hasDefaultRoute)
+            enqueueTunnelSettingsUpdate(settings, hasDefaultRoute: hasDefaultRoute, generation: generation)
             logger.log("tunnel config updated: \(config.localAddresses.count) addrs, \(config.routes.count) routes, \(config.excludeRoutes?.count ?? 0) excluded, \(config.dnsServers.count) DNS, defaultRoute=\(hasDefaultRoute)")
         } catch {
+            guard tunnelSettings.isActive(generation) else { return }
             logger.error("handleTunnelConfigUpdate: decode failed: \(error.localizedDescription)")
             sharedDefaults?.set("Tunnel config error: \(error.localizedDescription)",
                                forKey: IPCConstants.keyLastError)
@@ -177,11 +267,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private func registerTunnelConfigCallback() {
+    private func registerTunnelConfigCallback(generation: UUID) {
         #if canImport(Libtailscale)
         guard let app = GoBridge.application else { return }
         let configCb = GoTunnelConfigCallback { [weak self] configJSON in
-            self?.handleTunnelConfigUpdate(configJSON)
+            self?.handleTunnelConfigUpdate(configJSON, generation: generation)
         }
         tunnelConfigCallback = configCb
         LibtailscaleSetTunnelConfigCallback(app, configCb)
@@ -483,12 +573,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func handlePrepareToStop(completionHandler: ((Data?) -> Void)?) {
-        logger.log("prepareToStop: app requested tunnel shutdown")
-        markTunnelStopping()
-        sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
-        postDarwinNotification(IPCConstants.notifyStateChanged)
-        let resp = IPCResponse.success(statusCode: 200)
-        completionHandler?(try? JSONEncoder().encode(resp))
+        DispatchQueue.main.async { [self] in
+            logger.log("prepareToStop: app requested tunnel shutdown")
+            markTunnelStopping()
+            sharedDefaults?.removeObject(forKey: IPCConstants.keyLastError)
+            postDarwinNotification(IPCConstants.notifyStateChanged)
+            let resp = IPCResponse.success(statusCode: 200)
+            completionHandler?(try? JSONEncoder().encode(resp))
+        }
     }
 
     // MARK: - Notification Handling
@@ -569,10 +661,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func completeStartWithError(_ message: String,
                                         code: Int,
                                         completionHandler: @escaping (Error?) -> Void) {
+        markTunnelStopping()
         logger.error("startTunnel failed: \(message, privacy: .public)")
         publishLastError(message)
         let err = NSError(domain: "PacketTunnel", code: code,
                           userInfo: [NSLocalizedDescriptionKey: message])
+        tunnelFailure = err
         completionHandler(err)
     }
 
@@ -708,18 +802,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                            networkPrefixLength: NSNumber(value: route.prefixLen))
     }
 
-    private func resetTunnelLifecycleState() {
+    private func resetTunnelLifecycleState() -> UUID {
+        let generation = tunnelSettings.begin()
+        tunnelFailure = nil
         if DispatchQueue.getSpecific(key: packetStateQueueKey) != nil {
-            packetReadLoopRunning = false
+            packetBridgeGeneration = nil
         } else {
             packetStateQueue.sync {
-                packetReadLoopRunning = false
+                packetBridgeGeneration = nil
             }
-        }
-        tunnelSettingsQueue.sync {
-            tunnelStopping = false
-            tunnelSettingsInFlight = false
-            pendingTunnelSettings = nil
         }
         packetStateQueue.sync {
             packetsFromSystem = 0
@@ -735,13 +826,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             lastUnderlayRefreshTime = nil
         }
         hasPublishedBackendSnapshot = false
+        return generation
     }
 
     private func markTunnelStopping() {
-        tunnelSettingsQueue.sync {
-            tunnelStopping = true
-            pendingTunnelSettings = nil
-        }
+        tunnelSettings.stop()
         stopDefaultRouteMonitor()
         stopPacketBridge()
     }
@@ -762,181 +851,109 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func isTunnelStopping() -> Bool {
-        return tunnelSettingsQueue.sync {
-            tunnelStopping
-        }
+        tunnelSettings.isStopped
     }
 
     private func startDefaultRouteMonitor() {
-        stopDefaultRouteMonitor()
-        let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            self?.publishDefaultRouteInterface(from: path)
+        defaultRouteMonitorQueue.sync {
+            defaultRouteMonitor?.cancel()
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+                guard let self, let monitor, self.defaultRouteMonitor === monitor else { return }
+                self.publishDefaultRouteInterface(from: path)
+            }
+            defaultRouteMonitor = monitor
+            monitor.start(queue: defaultRouteMonitorQueue)
+            publishDefaultRouteInterface(from: monitor.currentPath)
         }
-        defaultRouteMonitor = monitor
-        monitor.start(queue: defaultRouteMonitorQueue)
-        publishDefaultRouteInterface(from: monitor.currentPath)
     }
 
     private func stopDefaultRouteMonitor() {
-        defaultRouteMonitor?.cancel()
-        defaultRouteMonitor = nil
+        defaultRouteMonitorQueue.sync {
+            defaultRouteMonitor?.cancel()
+            defaultRouteMonitor = nil
+        }
     }
 
     private func publishDefaultRouteInterface(from path: Network.NWPath) {
-        guard path.status == .satisfied,
-              let ifName = defaultRouteInterfaceName(from: path) else {
-            return
+        let interfaces = path.availableInterfaces.map {
+            TunnelPathInterface(name: $0.name, isLoopback: $0.type == .loopback,
+                                isUsedByPath: path.usesInterfaceType($0.type))
         }
-        GoBridge.updateDefaultRouteInterface(ifName)
-        logger.log("default route monitor: using interface \(ifName, privacy: .public)")
-    }
-
-    private func defaultRouteInterfaceName(from path: Network.NWPath) -> String? {
-        let preferredTypes: [Network.NWInterface.InterfaceType] = [.wifi, .wiredEthernet, .cellular]
-        for type in preferredTypes {
-            if let iface = path.availableInterfaces.first(where: { $0.type == type && !$0.name.hasPrefix("utun") }) {
-                return iface.name
-            }
+        if let ifName = tunnelDefaultRouteInterface(isSatisfied: path.status == .satisfied,
+                                                    interfaces: interfaces) {
+            GoBridge.updateDefaultRouteInterface(ifName)
+            logger.log("default route monitor: using interface \(ifName, privacy: .public)")
         }
-        return path.availableInterfaces.first { iface in
-            !iface.name.hasPrefix("utun") && iface.type != .loopback
-        }?.name
+        // The core deliberately retains its last known interface while offline.
+        // It must still re-evaluate reachability, including same-interface changes.
+        GoBridge.networkChanged()
     }
 
     private func enqueueTunnelSettingsUpdate(_ settings: NEPacketTunnelNetworkSettings,
                                              hasDefaultRoute: Bool? = nil,
+                                             generation: UUID? = nil,
                                              completion: ((Error?) -> Void)? = nil) {
-        tunnelSettingsQueue.async { [weak self] in
-            guard let self = self else { return }
-            guard !self.tunnelStopping else {
-                // The start completion reads lifecycle state synchronously on
-                // this queue. Invoke it outside the queue to avoid self-deadlock.
-                DispatchQueue.main.async { completion?(nil) }
-                return
-            }
-            let request = TunnelSettingsRequest(settings: settings, hasDefaultRoute: hasDefaultRoute, completion: completion)
-            if self.tunnelSettingsInFlight {
-                self.pendingTunnelSettings = request
-                return
-            }
-            self.tunnelSettingsInFlight = true
-            self.performTunnelSettingsUpdate(request)
-        }
-    }
-
-    private func performTunnelSettingsUpdate(_ request: TunnelSettingsRequest) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            guard !self.isTunnelStopping() else {
-                request.completion?(nil)
-                self.finishTunnelSettingsUpdate()
-                return
-            }
-            self.reasserting = true
-            self.setTunnelNetworkSettings(request.settings) { [weak self] error in
-                var completionError = error
-                if let error = error {
-                    if self?.isTunnelStopping() == true {
-                        completionError = nil
-                        self?.logger.log("setTunnelNetworkSettings failed while stopping; suppressing: \(error.localizedDescription)")
-                    } else {
-                        self?.logger.error("setTunnelNetworkSettings failed: \(error.localizedDescription)")
-                    }
-                    if request.hasDefaultRoute != nil && self?.isTunnelStopping() != true {
-                        self?.publishLastError("setTunnelNetworkSettings failed: \(error.localizedDescription)")
-                    }
-                } else if let hasDefaultRoute = request.hasDefaultRoute, let self {
-                    // Serialize the check and publication against stopTunnel.
-                    // An already-issued settings request may finish after stop.
-                    self.tunnelSettingsQueue.sync {
-                        if !self.tunnelStopping {
-                            self.publishTunnelDefaultRoute(hasDefaultRoute)
-                        }
-                    }
-                }
-                request.completion?(completionError)
-                self?.finishTunnelSettingsUpdate()
-            }
-        }
-    }
-
-    private func finishTunnelSettingsUpdate() {
-        tunnelSettingsQueue.async { [weak self] in
-            guard let self = self else { return }
-            if self.tunnelStopping {
-                self.pendingTunnelSettings = nil
-                self.tunnelSettingsInFlight = false
-                DispatchQueue.main.async { [weak self] in
-                    self?.reasserting = false
-                }
-                return
-            }
-            if let next = self.pendingTunnelSettings {
-                self.pendingTunnelSettings = nil
-                self.performTunnelSettingsUpdate(next)
-                return
-            }
-            self.tunnelSettingsInFlight = false
-            DispatchQueue.main.async { [weak self] in
-                self?.reasserting = false
-            }
-        }
+        let request = TunnelSettingsRequest(settings: settings, hasDefaultRoute: hasDefaultRoute)
+        tunnelSettings.enqueue(request, generation: generation ?? tunnelSettings.currentGeneration, completion: completion)
     }
 
     // MARK: - Packet Flow Bridge
 
     private func startPacketBridge() {
-        GoBridge.setPacketCallback { [weak self] packet in
-            self?.writePacketToFlow(packet)
-        }
-
+        guard let handlers = GoBridge.capturePacketHandlers() else { return }
+        let session = PacketBridgeSession(generation: tunnelSettings.currentGeneration, handlers: handlers)
         let shouldStartReadLoop = packetStateQueue.sync { () -> Bool in
-            if packetReadLoopRunning { return false }
-            packetReadLoopRunning = true
+            guard packetBridgeGeneration == nil else { return false }
+            packetBridgeGeneration = session.generation
             return true
         }
         guard shouldStartReadLoop else { return }
+
+        GoBridge.setPacketCallback { [weak self] packet in
+            self?.writePacketToFlow(packet, session: session)
+        }
         packetReadQueue.async { [weak self] in
-            guard let self = self else { return }
-            self.readPacketsFromFlow()
+            self?.readPacketsFromFlow(session: session)
         }
     }
 
     private func stopPacketBridge() {
-        if DispatchQueue.getSpecific(key: packetStateQueueKey) != nil {
-            packetReadLoopRunning = false
-        } else {
-            packetStateQueue.sync {
-                packetReadLoopRunning = false
-            }
-        }
+        // Lifecycle entry points run on main. Release the state queue before
+        // draining readers/writers, since their callbacks consult that queue.
+        packetStateQueue.sync { packetBridgeGeneration = nil }
         GoBridge.clearPacketCallback()
+        // Finish a write that passed its generation check before stop; it must
+        // not reach the shared packetFlow after a subsequent session starts.
+        packetReadQueue.sync {}
+        packetWriteQueue.sync {}
     }
 
-    private func readPacketsFromFlow() {
-        guard isPacketBridgeRunning() else { return }
+    private func readPacketsFromFlow(session: PacketBridgeSession) {
+        guard isPacketBridgeRunning(session.generation) else { return }
         packetFlow.readPackets { [weak self] packets, _ in
-            guard let self = self else { return }
+            guard let self else { return }
             self.packetReadQueue.async {
-                guard self.isPacketBridgeRunning() else { return }
+                guard self.isPacketBridgeRunning(session.generation) else { return }
                 for packet in packets {
+                    guard self.isPacketBridgeRunning(session.generation) else { return }
                     do {
-                        self.recordPacketFromSystem(byteCount: packet.count)
-                        try GoBridge.injectInboundPacket(packet)
+                        try session.handlers.inject(packet)
+                        self.recordPacketFromSystem(byteCount: packet.count, session: session)
                     } catch {
+                        guard self.isPacketBridgeRunning(session.generation) else { return }
                         self.logger.error("injectInboundPacket failed: \(error.localizedDescription)")
                     }
                 }
-                self.readPacketsFromFlow()
+                self.readPacketsFromFlow(session: session)
             }
         }
     }
 
-    private func writePacketToFlow(_ packet: Data) {
-        recordPacketFromGoCallback(byteCount: packet.count)
+    private func writePacketToFlow(_ packet: Data, session: PacketBridgeSession) {
+        recordPacketFromGoCallback(byteCount: packet.count, generation: session.generation)
         packetWriteQueue.async { [weak self] in
-            guard let self = self, self.isPacketBridgeRunning() else { return }
+            guard let self, self.isPacketBridgeRunning(session.generation) else { return }
             guard let protocolFamily = self.protocolFamily(for: packet) else {
                 self.logger.error("dropping packet with unknown IP version")
                 return
@@ -945,37 +962,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 self.logger.error("packetFlow rejected an outbound packet")
                 return
             }
-            self.recordPacketToSystem(byteCount: packet.count)
+            self.recordPacketToSystem(byteCount: packet.count, generation: session.generation)
         }
     }
 
-    private func isPacketBridgeRunning() -> Bool {
+    private func isPacketBridgeRunning(_ generation: UUID) -> Bool {
         if DispatchQueue.getSpecific(key: packetStateQueueKey) != nil {
-            return packetReadLoopRunning
+            return packetBridgeGeneration == generation
         }
-        return packetStateQueue.sync { packetReadLoopRunning }
+        return packetStateQueue.sync { packetBridgeGeneration == generation }
     }
 
-    private func recordPacketFromSystem(byteCount: Int) {
+    private func recordPacketFromSystem(byteCount: Int, session: PacketBridgeSession) {
         packetStateQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, packetBridgeGeneration == session.generation else { return }
             packetsFromSystem += 1
             bytesFromSystem += UInt64(byteCount)
-            recoverUnderlayIfPacketBridgeStalled()
+            recoverUnderlayIfPacketBridgeStalled(session: session)
         }
     }
 
-    private func recordPacketFromGoCallback(byteCount: Int) {
+    private func recordPacketFromGoCallback(byteCount: Int, generation: UUID) {
         packetStateQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, packetBridgeGeneration == generation else { return }
             packetsFromGoCallback += 1
             bytesFromGoCallback += UInt64(byteCount)
         }
     }
 
-    private func recordPacketToSystem(byteCount: Int) {
+    private func recordPacketToSystem(byteCount: Int, generation: UUID) {
         packetStateQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self, packetBridgeGeneration == generation else { return }
             packetsToSystem += 1
             bytesToSystem += UInt64(byteCount)
             lastPacketsToSystemProgressTime = Date()
@@ -983,7 +1000,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private func recoverUnderlayIfPacketBridgeStalled() {
+    private func recoverUnderlayIfPacketBridgeStalled(session: PacketBridgeSession) {
         guard packetBridgeHasDefaultRoute, packetsToSystem > 0 else { return }
 
         let now = Date()
@@ -1019,8 +1036,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let reason = "exit-node-stall system-to-go=\(packetsFromSystem) go-to-system=\(packetsToSystem) stalled=\(Int(stalledFor))s"
         logger.error("packet bridge appears stalled; refreshing underlay: \(reason, privacy: .public)")
-        DispatchQueue.global(qos: .utility).async {
-            GoBridge.rebindUnderlay(reason: reason)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard self?.isPacketBridgeRunning(session.generation) == true else { return }
+            session.handlers.refreshUnderlay(reason)
         }
     }
 

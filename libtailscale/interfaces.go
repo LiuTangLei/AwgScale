@@ -52,6 +52,7 @@ type Application interface {
 	CallLocalAPI(timeoutMillis int, method, endpoint string, body InputStream) (LocalAPIResponse, error)
 	CallLocalAPIMultipart(timeoutMillis int, method, endpoint string, parts FileParts) (LocalAPIResponse, error)
 	InjectInboundPacket(packet []byte) error
+	NetworkChanged()
 	NotifyPolicyChanged()
 	RebindUnderlay(why string)
 	SetPacketCallback(cb PacketCallback)

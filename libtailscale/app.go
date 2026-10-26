@@ -267,7 +267,6 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore) (
 	b.netMon = netMon
 	b.setupLogs(dataDir, logID, logf, sys.HealthTracker.Get())
 	a.tunnelConfigMgr.setDefaultRouteExcludeRoutes(b.defaultRouteExcludeRoutes)
-	a.tunnelConfigMgr.setExitNodeDNSServers(b.platformDNSServers)
 
 	dialer := new(tsdial.Dialer)
 	vf := &VPNFacade{
@@ -539,6 +538,20 @@ func (a *App) SetPacketCallback(cb PacketCallback) {
 	if b != nil && b.tunDev != nil {
 		b.tunDev.SetPacketCallback(cb)
 	}
+}
+
+// NetworkChanged wakes the network monitor after a platform path update.
+// Call it even when the interface name is unchanged: an address, reachability,
+// or Wi-Fi network can change while iOS keeps using the same interface.
+func (a *App) NetworkChanged() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped || a.backendState == nil || a.backendState.netMon == nil {
+		return
+	}
+	// InjectEvent is non-blocking and coalesces bursts. Holding mu prevents
+	// Stop from closing this backend between the lifecycle check and enqueue.
+	a.backendState.netMon.InjectEvent()
 }
 
 func (a *App) RebindUnderlay(why string) {

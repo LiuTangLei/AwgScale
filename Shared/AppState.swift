@@ -357,7 +357,7 @@ class AppState: ObservableObject {
 
     /// Reference to VPNManager for IPC. Set by the app at launch.
     weak var vpnManager: VPNManager?
-    private let loginBackend = AppLoginBackend()
+    private let loginBackend: AppLoginBackend
     private var isCompletingAppLogin = false
     private var loginStartTask: Task<Void, Never>?
     private var loginCompletionTask: Task<Void, Never>?
@@ -474,7 +474,7 @@ class AppState: ObservableObject {
             lastError = systemVPNUnavailableMessage
             return
         }
-        guard pendingWantRunning == nil, !isSwitchingNetworkMode else {
+        guard !isBackendTransitionInProgress else {
             lastError = "Wait for the current connection change to finish."
             return
         }
@@ -561,7 +561,7 @@ class AppState: ObservableObject {
         currentProfile != nil || selfNode != nil || !peers.isEmpty
     }
 
-    private var isBackendTransitionInProgress: Bool {
+    var isBackendTransitionInProgress: Bool {
         isLoggingOut || pendingWantRunning != nil || awgSyncInProgress != nil || isAwgOperationInProgress ||
             isUpdatingExitNode || isSwitchingNetworkMode || profileBackendLeaseCount > 0 ||
             isResumingAppBackend
@@ -593,7 +593,8 @@ class AppState: ObservableObject {
 
     // MARK: - Initialization
 
-    init(vpnPermissionCapability: Bool = hasPacketTunnelProviderEntitlement()) {
+    init(vpnPermissionCapability: Bool = hasPacketTunnelProviderEntitlement(), loginBackend: AppLoginBackend? = nil) {
+        self.loginBackend = loginBackend ?? AppLoginBackend()
         self.canUseVPNPermission = vpnPermissionCapability
         self.usesVPNPermission = defaultVPNPermissionEnabled(hasVPNCapability: vpnPermissionCapability)
 
@@ -1532,7 +1533,8 @@ class AppState: ObservableObject {
         }
 
         guard !isBackendTransitionInProgress else {
-            loginBackend.stop()
+            // The active transition owns the backend. A foreground event can
+            // arrive while its LocalAPI request is suspended; do not tear it down.
             return
         }
 
@@ -1879,6 +1881,10 @@ class AppState: ObservableObject {
         }
         guard profileBackendLeaseCount == 0 else {
             lastError = "Wait for profile management to finish before changing the connection."
+            return
+        }
+        guard !isBackendTransitionInProgress else {
+            lastError = "Wait for the current connection change to finish."
             return
         }
         if !usesVPNPermission {
