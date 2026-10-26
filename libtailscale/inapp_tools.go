@@ -395,57 +395,6 @@ func dialInAppDirectTCP(ctx context.Context, network, address string) (net.Conn,
 	return d.DialContext(ctx, network, address)
 }
 
-func resolveInAppAddr(ctx context.Context, b *backend, host string) (netip.Addr, error) {
-	addrs, err := resolveInAppAddrs(ctx, b, host)
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	if len(addrs) == 0 {
-		return netip.Addr{}, fmt.Errorf("%q did not resolve to an IP address", host)
-	}
-	return addrs[0], nil
-}
-
-func resolveInAppAddrs(ctx context.Context, b *backend, host string) ([]netip.Addr, error) {
-	host = normalizeTailnetName(host)
-	if addr, err := netip.ParseAddr(host); err == nil {
-		if inAppAddrRoutableWithoutExitNode(b, addr) || inAppExitNodeActive(b) {
-			return []netip.Addr{addr}, nil
-		}
-		if inAppAddrShouldStayInTailnet(addr) {
-			return nil, errors.New("tailnet route is not ready")
-		}
-		return nil, errors.New("select an exit node to reach non-tailnet addresses")
-	}
-
-	if addrs, ok := resolveInAppTailnetPeerAddrs(b, host); ok {
-		return addrs, nil
-	}
-
-	if addrs, ok := resolveInAppTailnetDNSAddrs(b, host); ok {
-		return addrs, nil
-	}
-
-	if inAppExitNodeActive(b) {
-		ipAddrs, err := lookupPublicIPAddrsViaExitNode(ctx, b, host)
-		if err != nil {
-			return nil, err
-		}
-		var addrs []netip.Addr
-		for _, ipAddr := range ipAddrs {
-			if addr, ok := netip.AddrFromSlice(ipAddr.IP); ok {
-				addrs = append(addrs, addr.Unmap())
-			}
-		}
-		if len(addrs) == 0 {
-			return nil, fmt.Errorf("%q did not resolve to an IP address", host)
-		}
-		return preferIPv4(addrs), nil
-	}
-
-	return nil, fmt.Errorf("%q is not a known tailnet host or IP", host)
-}
-
 func resolveInAppTailnetDNSAddrs(b *backend, host string) ([]netip.Addr, bool) {
 	if b == nil || b.backend == nil {
 		return nil, false

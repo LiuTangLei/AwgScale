@@ -130,3 +130,71 @@ func TestLocalAPIEmptyResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalAPIFirstFinalHeadersAreCommitted(t *testing.T) {
+	app := &App{ready: make(chan struct{})}
+	defer app.Stop()
+	headersWritten := make(chan struct{})
+	app.publishBackend(&backend{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.(http.Flusher).Flush()
+		w.WriteHeader(http.StatusInternalServerError)
+		close(headersWritten)
+		_, _ = io.WriteString(w, "created")
+	}))
+	resp, err := app.callLocalAPI(1000, "POST", "/test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Close()
+	<-headersWritten
+	if got := resp.StatusCode(); got != http.StatusCreated {
+		t.Fatalf("status changed after commitment: %d", got)
+	}
+	if body, err := resp.BodyBytes(); err != nil || string(body) != "created" {
+		t.Fatalf("body = %q, %v", body, err)
+	}
+}
+
+func TestLocalAPIHeadersReturnBeforeBodyAndCloseCancelsHandler(t *testing.T) {
+	app := &App{ready: make(chan struct{})}
+	defer app.Stop()
+	handlerDone := make(chan struct{})
+	app.publishBackend(&backend{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		w.WriteHeader(http.StatusAccepted)
+		<-r.Context().Done()
+	}))
+	resp, err := app.callLocalAPI(1000, "POST", "/test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode() != http.StatusAccepted {
+		t.Fatal("missing accepted status")
+	}
+	_ = resp.Close()
+	_ = resp.Close()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("discarded response kept its handler alive")
+	}
+}
+
+func TestLocalAPIBodyBytesReleasesResponse(t *testing.T) {
+	app := &App{ready: make(chan struct{})}
+	defer app.Stop()
+	app.publishBackend(&backend{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "response")
+	}))
+	resp, err := app.callLocalAPI(1000, "GET", "/test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := resp.BodyBytes(); err != nil || string(body) != "response" {
+		t.Fatalf("body = %q, %v", body, err)
+	}
+	if _, err := resp.(*Response).bodyReader.Read(make([]byte, 1)); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("response reader after consumption = %v, want closed", err)
+	}
+}

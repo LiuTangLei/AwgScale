@@ -29,9 +29,11 @@
 		4FC2DF63BB9AA63F6D15C561 /* AppStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD15643118690667863DC71D /* AppStateTests.swift */; };
 		5544FCC99CD82CE24BF4883F /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C53814C2A8D164BE7BE749B2 /* AboutView.swift */; };
 		567B54FC73000865CD3C5B65 /* InAppTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05540FFB9A6ECC4238832F87 /* InAppTools.swift */; };
+		57EA3674537567E9F0B956A7 /* ProviderReplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D02886F9582598BCA1DD79 /* ProviderReplyTests.swift */; };
 		5A665B6173A0D928E7115264 /* SubnetRoutesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D60BBBBCFD59EEB3A37ADD2 /* SubnetRoutesView.swift */; };
 		5E080007E5B3E90AB7F44184 /* IPCConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7DFF68F815573C7B2FB9C93 /* IPCConstants.swift */; };
 		6300D4B1200BBEA0DE8C27C5 /* InputStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E30ED9E440E9A01590B475C /* InputStreamTests.swift */; };
+		640A376DC82EFB3F4B995BF6 /* GoBridgeRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12062367623D21DDC18CA032 /* GoBridgeRequestTests.swift */; };
 		644CDDBBFE0C02A81F3840FF /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = B52DA0986C6B0E3403404C84 /* Models.swift */; };
 		64997A53B5B34681C6FC1FF6 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6842DDBB8BBE14D50B0356AF /* LoginView.swift */; };
 		64D50C5C9C0F4E345E2799C6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CC0653BB6A7B92A0662385C /* SettingsView.swift */; };
@@ -151,6 +153,7 @@
 		0AEC45340B42C9BF85097D36 /* TailnetLockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailnetLockView.swift; sourceTree = "<group>"; };
 		0B865EFB9C45FBF8960A9D11 /* TunnelConfigBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfigBridge.swift; sourceTree = "<group>"; };
 		0CF4F423B5058755FC092C68 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
+		12062367623D21DDC18CA032 /* GoBridgeRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoBridgeRequestTests.swift; sourceTree = "<group>"; };
 		135537A9AE33E03B62D16AFA /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		1511CB1EAE9FBF65323155EF /* PeerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerDetailView.swift; sourceTree = "<group>"; };
 		17ADF256A5F8DD3D8E382EC6 /* TunnelSettingsCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelSettingsCoordinatorTests.swift; sourceTree = "<group>"; };
@@ -179,8 +182,8 @@
 		7EB4D8971FD57391CC241E53 /* LocalAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAPI.swift; sourceTree = "<group>"; };
 		7F2DAC155BF61D855982D220 /* AwgScale.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AwgScale.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		815FF707A0051CF4B2D3B7FA /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		86D02886F9582598BCA1DD79 /* ProviderReplyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderReplyTests.swift; sourceTree = "<group>"; };
 		8A46AE78793D421CBC436384 /* AwgScale.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AwgScale.entitlements; sourceTree = "<group>"; };
-		907C9F7B38F1AA1F21B659B9 /* Tailscale.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Tailscale.entitlements; sourceTree = "<group>"; };
 		93C2E69539793D8E2F4C7004 /* InAppToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InAppToolsView.swift; sourceTree = "<group>"; };
 		958786FF98B375930998DA0D /* MDMSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDMSettings.swift; sourceTree = "<group>"; };
 		99C8D00DDFFE30576F65E3BB /* PacketTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -316,7 +319,6 @@
 				A66E6CFE67E8D25EFFAC7451 /* AwgScaleApp.swift */,
 				57F141D4DBB9AB3AF281E4DA /* ContentView.swift */,
 				5458F99567F95E1DB28940F5 /* Info.plist */,
-				907C9F7B38F1AA1F21B659B9 /* Tailscale.entitlements */,
 				5CAE3422B350F7C7A6847A6D /* Views */,
 			);
 			path = App;
@@ -348,10 +350,12 @@
 			children = (
 				DFA731A05CA31C2A4951D157 /* AppLoginBackendTests.swift */,
 				CD15643118690667863DC71D /* AppStateTests.swift */,
+				12062367623D21DDC18CA032 /* GoBridgeRequestTests.swift */,
 				1E30ED9E440E9A01590B475C /* InputStreamTests.swift */,
 				6EE49E163765750531F9425C /* KeychainPreferencesTests.swift */,
 				A403E36719921FB40931595A /* LocalAPITests.swift */,
 				3E99DFD862444C6CE8C25268 /* ModelsTests.swift */,
+				86D02886F9582598BCA1DD79 /* ProviderReplyTests.swift */,
 				528B42950555104BB573E249 /* TunnelConfigBridgeTests.swift */,
 				17ADF256A5F8DD3D8E382EC6 /* TunnelSettingsCoordinatorTests.swift */,
 				D028AE4D7873B518F5E6EEF5 /* VPNLifecycleTests.swift */,
@@ -583,10 +587,12 @@
 			files = (
 				4F54A9A1E42488F76421B2F6 /* AppLoginBackendTests.swift in Sources */,
 				4FC2DF63BB9AA63F6D15C561 /* AppStateTests.swift in Sources */,
+				640A376DC82EFB3F4B995BF6 /* GoBridgeRequestTests.swift in Sources */,
 				6300D4B1200BBEA0DE8C27C5 /* InputStreamTests.swift in Sources */,
 				B72A07A8EB975841C39CEE1A /* KeychainPreferencesTests.swift in Sources */,
 				6DB9738B2707425ACF2197E0 /* LocalAPITests.swift in Sources */,
 				93091F202B1D365F57DA0CAD /* ModelsTests.swift in Sources */,
+				57EA3674537567E9F0B956A7 /* ProviderReplyTests.swift in Sources */,
 				916EA07DAE50613836CE3951 /* TunnelConfigBridgeTests.swift in Sources */,
 				B607DF8568BA410607FA4414 /* TunnelSettingsCoordinatorTests.swift in Sources */,
 				E2C29A9B51C5DB0D66942E53 /* VPNLifecycleTests.swift in Sources */,

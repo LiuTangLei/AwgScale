@@ -84,7 +84,7 @@ type FilePart struct {
 type LocalAPIResponse interface {
 	StatusCode() int
 	BodyBytes() ([]byte, error)
-	BodyInputStream() InputStream
+	Close() error
 }
 
 // NotificationCallback receives ipn.Notify messages serialized as JSON.

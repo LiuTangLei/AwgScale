@@ -2,7 +2,7 @@ package libtailscale
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,8 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"tailscale.com/ipn"
 )
 
 // CallLocalAPI calls the given endpoint on the local API using the given HTTP
@@ -44,83 +42,95 @@ func (app *App) CallLocalAPIMultipart(timeoutMillis int, method, endpoint string
 	mw := multipart.NewWriter(w)
 	header := make(http.Header)
 	header.Set("Content-Type", mw.FormDataContentType())
-	resultCh := make(chan interface{}, 2)
-	go func() {
-		resp, err := app.callLocalAPI(timeoutMillis, method, endpoint, header, r)
-		if err != nil {
-			resultCh <- err
-		} else {
-			resultCh <- resp
+	// Own all sources from the start, including parts never reached after an
+	// early server rejection or startup failure. The adapters close once.
+	bodies := make([]io.ReadCloser, parts.Len())
+	for i := range bodies {
+		bodies[i] = adaptInputStream(parts.Get(int32(i)).Body)
+		if bodies[i] != nil {
+			defer bodies[i].Close()
 		}
+	}
+	written := make(chan error, 1)
+	go func() {
+		err := func() error {
+			for i, body := range bodies {
+				part := parts.Get(int32(i))
+				contentType := "application/octet-stream"
+				if part.ContentType != "" {
+					contentType = part.ContentType
+				}
+				header := make(textproto.MIMEHeader, 3)
+				header.Set("Content-Disposition",
+					fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+						escapeQuotes("file"), escapeQuotes(part.Filename)))
+				header.Set("Content-Type", contentType)
+				header.Set("Content-Length", strconv.FormatInt(part.ContentLength, 10))
+				p, err := mw.CreatePart(header)
+				if err != nil {
+					return fmt.Errorf("CreatePart: %w", err)
+				}
+				if body == nil {
+					return fmt.Errorf("missing body for multipart file %q", part.Filename)
+				}
+				_, err = io.Copy(p, body)
+				closeErr := body.Close()
+				if err == nil {
+					err = closeErr
+				}
+				if err != nil {
+					return fmt.Errorf("Copy: %w", err)
+				}
+			}
+			return mw.Close()
+		}()
+		written <- err
+		_ = w.CloseWithError(err)
 	}()
 
-	go func() {
-		for i := int32(0); i < parts.Len(); i++ {
-			part := parts.Get(i)
-			contentType := "application/octet-stream"
-			if part.ContentType != "" {
-				contentType = part.ContentType
+	response, err := app.callLocalAPI(timeoutMillis, method, endpoint, header, r)
+	if err != nil {
+		return nil, err
+	}
+	// An HTTP rejection need not consume the upload. Successful uploads must
+	// finish copying all parts; response headers alone cannot prove delivery.
+	if response.StatusCode() >= http.StatusMultipleChoices {
+		select {
+		case writeErr := <-written:
+			if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+				_ = response.Close()
+				return nil, writeErr
 			}
-			header := make(textproto.MIMEHeader, 3)
-			header.Set("Content-Disposition",
-				fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-					escapeQuotes("file"), escapeQuotes(part.Filename)))
-			header.Set("Content-Type", contentType)
-			header.Set("Content-Length", strconv.FormatInt(part.ContentLength, 10))
-			p, err := mw.CreatePart(header)
-			if err != nil {
-				resultCh <- fmt.Errorf("CreatePart: %w", err)
-				return
-			}
-			body := adaptInputStream(part.Body)
-			_, err = io.Copy(p, body)
-			closeErr := body.Close()
-			if err == nil {
-				err = closeErr
-			}
-			if err != nil {
-				resultCh <- fmt.Errorf("Copy: %w", err)
-				return
-			}
+		default:
 		}
-
-		err := mw.Close()
+		return response, nil
+	}
+	resp := response.(*Response)
+	timer := time.NewTimer(time.Until(resp.deadline))
+	defer timer.Stop()
+	var stopped <-chan struct{}
+	if app.ctx != nil {
+		stopped = app.ctx.Done()
+	}
+	select {
+	case err := <-written:
 		if err != nil {
-			resultCh <- fmt.Errorf("Close MultipartWriter: %w", err)
+			_ = response.Close()
+			return nil, err
 		}
-		err = w.Close()
-		if err != nil {
-			resultCh <- fmt.Errorf("Close Writer: %w", err)
-		}
-	}()
-
-	result := <-resultCh
-	switch t := result.(type) {
-	case LocalAPIResponse:
-		return t, nil
-	case error:
-		return nil, t
-	default:
-		panic("unexpected result type")
+		return response, nil
+	case <-timer.C:
+		_ = response.Close()
+		return nil, context.DeadlineExceeded
+	case <-stopped:
+		_ = response.Close()
+		return nil, context.Canceled
 	}
 }
 
 // NotifyPolicyChanged notifies the backend about a changed MDM policy.
 func (app *App) NotifyPolicyChanged() {
 	app.policyStore.notifyChanged()
-}
-
-// EditPrefs encodes the given MaskedPrefs and patches them via the local API.
-func (app *App) EditPrefs(prefs ipn.MaskedPrefs) (LocalAPIResponse, error) {
-	r, w := io.Pipe()
-	go func() {
-		defer w.Close()
-		enc := json.NewEncoder(w)
-		if err := enc.Encode(prefs); err != nil {
-			log.Printf("Error encoding preferences: %v", err)
-		}
-	}()
-	return app.callLocalAPI(30000, "PATCH", "prefs", nil, r)
 }
 
 func (app *App) callLocalAPI(timeoutMillis int, method, endpoint string, header http.Header, body io.ReadCloser) (LocalAPIResponse, error) {
@@ -178,7 +188,8 @@ func (app *App) callLocalAPI(timeoutMillis int, method, endpoint string, header 
 
 	resp := &Response{
 		headers:          http.Header{},
-		status:           http.StatusOK,
+		deadline:         deadline,
+		cancel:           cancel,
 		bodyReader:       pipeReader,
 		bodyWriter:       pipeWriter,
 		startWritingBody: make(chan interface{}),
@@ -236,12 +247,14 @@ func (app *App) callLocalAPI(timeoutMillis int, method, endpoint string, header 
 
 // Response represents the result of processing a localAPI request.
 type Response struct {
-	headers              http.Header
-	status               int
-	bodyWriter           net.Conn
-	bodyReader           net.Conn
-	startWritingBody     chan interface{}
-	startWritingBodyOnce sync.Once
+	deadline         time.Time
+	cancel           context.CancelFunc
+	headers          http.Header
+	statusMu         sync.Mutex
+	status           int
+	bodyWriter       net.Conn
+	bodyReader       net.Conn
+	startWritingBody chan interface{}
 }
 
 func (r *Response) Header() http.Header {
@@ -250,14 +263,20 @@ func (r *Response) Header() http.Header {
 
 func (r *Response) Write(data []byte) (int, error) {
 	r.Flush()
-	if r.status == 0 {
-		r.WriteHeader(http.StatusOK)
-	}
 	return r.bodyWriter.Write(data)
 }
 
 func (r *Response) WriteHeader(statusCode int) {
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		return // An informational response does not commit final headers.
+	}
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	if r.status != 0 {
+		return
+	}
 	r.status = statusCode
+	close(r.startWritingBody)
 }
 
 func (r *Response) Body() net.Conn {
@@ -265,21 +284,23 @@ func (r *Response) Body() net.Conn {
 }
 
 func (r *Response) BodyBytes() ([]byte, error) {
+	defer r.Close()
 	return io.ReadAll(r.bodyReader)
 }
 
-func (r *Response) BodyInputStream() InputStream {
-	return nil
+func (r *Response) Close() error {
+	r.cancel()
+	return r.bodyReader.Close()
 }
 
 func (r *Response) StatusCode() int {
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
 	return r.status
 }
 
 func (r *Response) Flush() {
-	r.startWritingBodyOnce.Do(func() {
-		close(r.startWritingBody)
-	})
+	r.WriteHeader(http.StatusOK)
 }
 
 var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")

@@ -355,6 +355,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - IPC: App → Extension
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        DispatchQueue.main.async { [self] in
+            handleAppMessageOnMain(messageData, completionHandler: completionHandler)
+        }
+    }
+
+    private func handleAppMessageOnMain(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         do {
             let request = try JSONDecoder().decode(IPCRequest.self, from: messageData)
 
@@ -390,31 +396,30 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let timeout = request.timeoutMillis ?? 30000
         let body: Data? = request.bodyBase64.flatMap { Data(base64Encoded: $0) }
         let readBody = request.readBody ?? true
+        let generation = tunnelSettings.currentGeneration
+        let backend = GoBridge.captureBackend()
 
         Task {
             let startedAt = Date()
             do {
-                guard await waitForGoBackendStarted(maxWaitMillis: max(12_000, timeout)) else {
-                    let message = isTunnelStopping() ? "Go backend is stopping" : "Go backend is not ready"
-                    let resp = IPCResponse.failure(message)
-                    completionHandler?(try? JSONEncoder().encode(resp))
-                    return
-                }
+                guard tunnelSettings.isActive(generation) else { throw CancellationError() }
                 let apiResp = try await GoBridge.callLocalAPI(
                     timeoutMillis: timeout,
                     method: method,
                     endpoint: endpoint,
                     body: body,
-                    readBody: readBody
+                    readBody: readBody,
+                    backend: backend
                 )
+                guard tunnelSettings.isActive(generation) else { throw CancellationError() }
                 let resp = IPCResponse.success(statusCode: apiResp.statusCode, body: apiResp.body)
                 completionHandler?(try? JSONEncoder().encode(resp))
                 logLocalAPICompletionIfUseful(method: method, endpoint: endpoint, statusCode: apiResp.statusCode, startedAt: startedAt)
             } catch {
                 let durationMillis = Int(Date().timeIntervalSince(startedAt) * 1000)
                 logger.error("LocalAPI failed method=\(method, privacy: .public) endpoint=\(endpoint, privacy: .public) durationMs=\(durationMillis, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-                if shouldPublishLocalAPIError(endpoint: endpoint) {
-                    publishLastError(error.localizedDescription)
+                if tunnelSettings.isActive(generation), shouldPublishLocalAPIError(endpoint: endpoint) {
+                    publishRequestError(error.localizedDescription, generation: generation)
                 }
                 let resp = IPCResponse.failure(error.localizedDescription)
                 completionHandler?(try? JSONEncoder().encode(resp))
@@ -448,15 +453,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let timeout = request.timeoutMillis ?? 600000
         let readBody = request.readBody ?? false
+        let generation = tunnelSettings.currentGeneration
+        let backend = GoBridge.captureBackend()
 
         Task {
             do {
-                guard await waitForGoBackendStarted(maxWaitMillis: max(12_000, timeout)) else {
-                    let message = isTunnelStopping() ? "Go backend is stopping" : "Go backend is not ready"
-                    let resp = IPCResponse.failure(message)
-                    completionHandler?(try? JSONEncoder().encode(resp))
-                    return
-                }
+                guard tunnelSettings.isActive(generation) else { throw CancellationError() }
                 if method.uppercased() == "POST",
                    let peerID = taildropFilePutPeerID(from: endpoint) {
                     let transferID = request.bodyFileTransferID ?? UUID().uuidString
@@ -472,17 +474,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                                 peerID: peerID,
                                 fileURL: uploadURL,
                                 transferID: transferID,
-                                readBody: true
+                                readBody: true,
+                                backend: backend
                             )
+                            guard tunnelSettings.isActive(generation) else { return }
                             if !(200..<300).contains(apiResp.statusCode) {
                                 let body = String(data: apiResp.body, encoding: .utf8)?
                                     .trimmingCharacters(in: .whitespacesAndNewlines)
                                 let detail = body.map { $0.isEmpty ? "" : ": \($0)" } ?? ""
-                                publishLastError("Taildrop upload failed with HTTP \(apiResp.statusCode)\(detail)")
+                                publishRequestError("Taildrop upload failed with HTTP \(apiResp.statusCode)\(detail)", generation: generation)
                             }
                         } catch {
                             logger.error("Detached Taildrop upload failed peer=\(peerID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-                            publishLastError("Taildrop upload failed: \(error.localizedDescription)")
+                            if tunnelSettings.isActive(generation) {
+                                publishRequestError("Taildrop upload failed: \(error.localizedDescription)", generation: generation)
+                            }
                         }
                     }
                     return
@@ -493,14 +499,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     method: method,
                     endpoint: endpoint,
                     bodyFileURL: fileURL,
-                    readBody: readBody
+                    readBody: readBody,
+                    backend: backend
                 )
+                guard tunnelSettings.isActive(generation) else { throw CancellationError() }
                 let resp = IPCResponse.success(statusCode: apiResp.statusCode, body: apiResp.body)
                 completionHandler?(try? JSONEncoder().encode(resp))
             } catch {
                 logger.error("LocalAPI shared-file failed method=\(method, privacy: .public) endpoint=\(endpoint, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-                sharedDefaults?.set(error.localizedDescription, forKey: IPCConstants.keyLastError)
-                postDarwinNotification(IPCConstants.notifyStateChanged)
+                if tunnelSettings.isActive(generation) {
+                    publishRequestError(error.localizedDescription, generation: generation)
+                }
                 let resp = IPCResponse.failure(error.localizedDescription)
                 completionHandler?(try? JSONEncoder().encode(resp))
             }
@@ -547,22 +556,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return fileURL
     }
 
-    private func waitForGoBackendStarted(maxWaitMillis: Int) async -> Bool {
-        let deadline = Date().addingTimeInterval(TimeInterval(maxWaitMillis) / 1000.0)
-        while GoBridge.application == nil && !isTunnelStopping() && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        return GoBridge.application != nil && !isTunnelStopping()
-    }
-
     private func handleStartLoginInteractive(completionHandler: ((Data?) -> Void)?) {
+        let generation = tunnelSettings.currentGeneration
+        let backend = GoBridge.captureBackend()
         Task {
             do {
+                guard tunnelSettings.isActive(generation) else { throw CancellationError() }
                 let apiResp = try await GoBridge.callLocalAPI(
                     timeoutMillis: 30000,
                     method: "POST",
-                    endpoint: "/localapi/v0/login-interactive"
+                    endpoint: "/localapi/v0/login-interactive",
+                    backend: backend
                 )
+                guard tunnelSettings.isActive(generation) else { throw CancellationError() }
                 let resp = IPCResponse.success(statusCode: apiResp.statusCode, body: apiResp.body)
                 completionHandler?(try? JSONEncoder().encode(resp))
             } catch {
@@ -675,6 +681,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         postDarwinNotification(IPCConstants.notifyStateChanged)
     }
 
+    private func publishRequestError(_ message: String, generation: UUID) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.tunnelSettings.isActive(generation) else { return }
+            self.publishLastError(message)
+        }
+    }
+
     private func publishCompletedIncomingTaildropFiles(_ incomingFiles: [TaildropIncomingFile]) {
         let completedFiles = incomingFiles.filter(\.isDone)
         guard !completedFiles.isEmpty else { return }
@@ -751,16 +764,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.mtu = 1280
 
         return settings
-    }
-
-    /// Re-apply tunnel settings without destroying the TUN device.
-    /// iOS supports this via setTunnelNetworkSettings + reasserting flag.
-    func updateTunnelSettings(_ settings: NEPacketTunnelNetworkSettings, hasDefaultRoute: Bool) {
-        enqueueTunnelSettingsUpdate(settings, hasDefaultRoute: hasDefaultRoute) { [weak self] error in
-            if let error = error {
-                self?.logger.error("updateTunnelSettings failed: \(error.localizedDescription)")
-            }
-        }
     }
 
     // MARK: - Helpers
@@ -848,10 +851,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         #endif
         tunnelConfigCallback = nil
         GoBridge.stopBackend()
-    }
-
-    private func isTunnelStopping() -> Bool {
-        tunnelSettings.isStopped
     }
 
     private func startDefaultRouteMonitor() {

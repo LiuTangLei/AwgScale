@@ -8,10 +8,9 @@ AwgScale is independent software — not affiliated with, sponsored by, or appro
 
 ## 1.104.2 preview
 
-Local **build 13** adds the follow-up reliability fixes based on the recovered
-official iOS implementation: network handoff notifications, bounded settings
-application, session isolation, exit-node MagicDNS, stream cleanup and logging.
-See [the comparison and validation record](docs/ios-official-reliability-20261026.md).
+Local **build 14** continues the [official implementation comparison](docs/ios-official-reliability-20261026.md)
+with further request/response lifecycle fixes and verified dead-code removal.
+See [the legacy code audit](docs/ios-legacy-cleanup-20261027.md).
 This candidate has not been published; the link below is the existing preview.
 
 [Download the 1.104.2 preview](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.104.2).

@@ -1105,25 +1105,6 @@ class AppState: ObservableObject {
         return try response.decodedBody(InAppBrowserProxy.self, endpoint: endpoint)
     }
 
-    func sendInAppTerminalInput(host: String, port: Int, payload: String) async throws -> InAppTerminalResponse {
-        let endpoint = "/localapi/v0/awgscale/tcp-console"
-        let request = InAppTerminalRequest(
-            host: host,
-            port: port,
-            payload: payload,
-            appendNewline: true,
-            timeoutMillis: 8000
-        )
-        let body = try JSONEncoder().encode(request)
-        let response = try await activeLocalAPIClient().raw(
-            method: "POST",
-            endpoint: endpoint,
-            body: body,
-            timeout: 10000
-        )
-        return try response.decodedBody(InAppTerminalResponse.self, endpoint: endpoint)
-    }
-
     func openInAppSSHSession(host: String, port: Int, username: String, password: String, privateKey: String = "", passphrase: String = "") async throws -> InAppSSHResponse {
         let endpoint = "/localapi/v0/awgscale/ssh/open"
         let request = InAppSSHOpenRequest(
@@ -2350,16 +2331,6 @@ class AppState: ObservableObject {
 
     // MARK: - AWG Sync
 
-    /// Load AWG config status for all peers via awg-sync-peers endpoint.
-    func loadAwgPeersStatus() {
-        refreshAwgStatus(showMessages: true, force: true)
-    }
-
-    /// Load local machine AWG configuration status from prefs.
-    func loadLocalAwgStatus() {
-        refreshAwgStatus(showMessages: true, force: true)
-    }
-
     func refreshAwgStatus(showMessages: Bool = true, force: Bool = true) {
         if awgPeersLoading {
             let currentPeerFingerprint = awgPeerRefreshFingerprint()
@@ -3298,13 +3269,6 @@ class AppState: ObservableObject {
             value.unicodeScalars.allSatisfy { hexadecimalDigits.contains($0) }
     }
 
-    private func responseErrorMessage(_ response: IPCResponse) -> String {
-        if let bodyPreview = response.bodyPreview() {
-            return bodyPreview
-        }
-        return response.error ?? "Unknown error (status \(response.statusCode))"
-    }
-
     private func preferredAwgPeer(existing: AwgPeerResult?, new: AwgPeerResult) -> AwgPeerResult {
         guard let existing = existing else { return new }
         if new.hasAwgConfig && !existing.hasAwgConfig {
@@ -3485,15 +3449,6 @@ class AppState: ObservableObject {
                 prefs = previousPrefs
                 lastError = "Failed to update LAN access setting: \(error.localizedDescription)"
             }
-        }
-    }
-
-    private func refreshPrefsFromActiveBackend(timeout: Int = 3000) async {
-        do {
-            prefs = try await activeLocalAPIClient().ipnPrefs(timeout: timeout)
-            updateLocalAwgStatusFromCachedPrefs()
-        } catch {
-            // Notify updates from the backend will refresh prefs shortly.
         }
     }
 

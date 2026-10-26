@@ -5,7 +5,7 @@ final class AppLoginBackend {
     struct Runtime {
         var start: () throws -> Void
         var stop: () -> Void
-        var callLocalAPI: (String, String, Data?, Int, Bool) async throws -> IPCResponse
+        var callLocalAPI: @MainActor (String, String, Data?, Int, Bool) async throws -> IPCResponse
         var watchNotifications: (@escaping (Data) -> Void) -> NotificationHandle?
         var stopNotifications: (NotificationHandle) -> Void
 
@@ -28,13 +28,15 @@ final class AppLoginBackend {
                 },
                 stop: { GoBridge.stopBackend() },
                 callLocalAPI: { method, endpoint, body, timeout, readBody in
+                    let backend = GoBridge.captureBackend()
                     let response = try await Task.detached(priority: .userInitiated) {
                         try await GoBridge.callLocalAPI(
                             timeoutMillis: timeout,
                             method: method,
                             endpoint: endpoint,
                             body: body,
-                            readBody: readBody
+                            readBody: readBody,
+                            backend: backend
                         )
                     }.value
                     return IPCResponse.success(statusCode: response.statusCode, body: response.body)

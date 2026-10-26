@@ -50,20 +50,7 @@ func (b *backend) setupLogs(logDir string, logID logid.PrivateID, logf logger.Lo
 	}
 	logcfg.FlushDelayFn = func() time.Duration { return 2 * time.Minute }
 
-	filchOpts := filch.Options{
-		// This backend shares its process with Swift/NetworkExtension (and
-		// XCTest). OSLog can echo logtail output to stderr; capturing fd 2
-		// feeds that output back into filch and swallows host diagnostics.
-		// Explicit logtail writes still use the persistent buffer below.
-		ReplaceStderr: false,
-	}
-
-	var filchErr error
-	if logDir != "" {
-		logPath := filepath.Join(logDir, "ipn.log.")
-		logcfg.Buffer, filchErr = filch.New(logPath, filchOpts)
-	}
-
+	filchErr := b.configureLogBuffer(&logcfg, logDir)
 	b.logger = logtail.NewLogger(logcfg, logf)
 
 	log.SetFlags(0)
@@ -77,4 +64,25 @@ func (b *backend) setupLogs(logDir string, logID logid.PrivateID, logf logger.Lo
 	if filchErr != nil {
 		log.Printf("setupLogs: filch setup failed: %v", filchErr)
 	}
+}
+
+func (b *backend) configureLogBuffer(config *logtail.Config, logDir string) error {
+	if logDir == "" {
+		return nil
+	}
+	buffer, err := filch.New(filepath.Join(logDir, "ipn.log."), filch.Options{
+		// This backend shares its process with Swift/NetworkExtension (and
+		// XCTest). OSLog can echo logtail output to stderr; capturing fd 2
+		// feeds that output back into filch and swallows host diagnostics.
+		// Explicit logtail writes still use the persistent buffer below.
+		ReplaceStderr: false,
+	})
+	if err != nil {
+		// A typed nil *Filch in the Buffer interface bypasses logtail's
+		// in-memory fallback and panics on the next log write.
+		return err
+	}
+	config.Buffer = buffer
+	b.logBuffer = buffer
+	return nil
 }

@@ -3,6 +3,7 @@ package libtailscale
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -87,6 +88,7 @@ type backend struct {
 	netMon      *netmon.Monitor
 	logIDPublic logid.PublicID
 	logger      *logtail.Logger
+	logBuffer   io.Closer
 	bus         *eventbus.Bus
 	appCtx      AppContext
 }
@@ -698,6 +700,9 @@ func (a *App) closeBackendState(backendState *backend) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = backendState.logger.Shutdown(ctx)
+	}
+	if backendState.logBuffer != nil {
+		_ = backendState.logBuffer.Close()
 	}
 }
 

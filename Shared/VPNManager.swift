@@ -270,36 +270,8 @@ class VPNManager: ObservableObject {
         guard let session = manager?.connection as? NETunnelProviderSession else {
             throw VPNError.noSession
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            let lock = NSLock()
-            var didResume = false
-
-            func resume(_ result: Result<Data?, Error>) {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !didResume else { return }
-                didResume = true
-                switch result {
-                case .success(let response):
-                    continuation.resume(returning: response)
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
-            }
-
-            do {
-                try session.sendProviderMessage(data) { response in
-                    resume(.success(response))
-                }
-            } catch {
-                resume(.failure(error))
-                return
-            }
-
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                resume(.failure(VPNError.ipcTimeout))
-            }
+        return try await waitForProviderReply(timeoutSeconds: timeoutSeconds) { reply in
+            try session.sendProviderMessage(data, responseHandler: reply)
         }
     }
 
@@ -436,9 +408,72 @@ class VPNManager: ObservableObject {
     }
 }
 
+/// NETunnelProviderSession has no cancellation API. End the caller's wait and
+/// release its timer on cancellation, reply or error; ignore a late callback.
+@MainActor
+func waitForProviderReply(
+    timeoutSeconds: TimeInterval,
+    send: (@escaping (Data?) -> Void) throws -> Void
+) async throws -> Data? {
+    let reply = ProviderReply()
+    return try await withTaskCancellationHandler {
+        try Task.checkCancellation()
+        return try await withCheckedThrowingContinuation { continuation in
+            guard reply.install(continuation, timeout: timeoutSeconds) else { return }
+            do {
+                try send { reply.finish(.success($0)) }
+            } catch {
+                reply.finish(.failure(error))
+            }
+        }
+    } onCancel: {
+        reply.finish(.failure(CancellationError()))
+    }
+}
+
+private final class ProviderReply {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data?, Error>?
+    private var earlyResult: Result<Data?, Error>?
+    private var finished = false
+    private var timer: DispatchSourceTimer?
+
+    func install(_ continuation: CheckedContinuation<Data?, Error>, timeout: TimeInterval) -> Bool {
+        lock.lock()
+        if let result = earlyResult {
+            earlyResult = nil
+            lock.unlock()
+            continuation.resume(with: result)
+            return false
+        }
+        self.continuation = continuation
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + timeout)
+        timer.setEventHandler { [weak self] in
+            self?.finish(.failure(VPNError.ipcTimeout))
+        }
+        self.timer = timer
+        timer.resume()
+        lock.unlock()
+        return true
+    }
+
+    func finish(_ result: Result<Data?, Error>) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        if continuation == nil { earlyResult = result }
+        timer?.cancel()
+        timer = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
 enum VPNError: Error, LocalizedError {
     case noSession
-    case sendFailed
     case noManager
     case backendNotReady(String)
     case ipcTimeout
@@ -448,7 +483,6 @@ enum VPNError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noSession: return "No active VPN session"
-        case .sendFailed: return "Failed to send message to Extension"
         case .noManager: return "VPN manager not configured"
         case .backendNotReady(let message): return "VPN backend did not become ready: \(message)"
         case .ipcTimeout: return "Timed out waiting for Packet Tunnel IPC response"

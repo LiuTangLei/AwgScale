@@ -8,7 +8,20 @@ import Foundation
 
 #if canImport(Libtailscale)
 import Libtailscale
+#endif
 
+/// Freeze a request's owner before it enters an asynchronous queue.
+struct GoBackendReference {
+    #if canImport(Libtailscale)
+    fileprivate let application: (any LibtailscaleApplicationProtocol)?
+
+    init(application: (any LibtailscaleApplicationProtocol)?) {
+        self.application = application
+    }
+    #endif
+}
+
+#if canImport(Libtailscale)
 enum GoBridge {
     static var coreVersion: String { LibtailscaleCoreVersion() }
 
@@ -31,6 +44,10 @@ enum GoBridge {
     private static var appContext: GoAppContext?
     /// Retain packet callback while Go holds a reference.
     private static var packetCallback: GoPacketCallback?
+
+    static func captureBackend() -> GoBackendReference {
+        GoBackendReference(application: application)
+    }
 
     /// Start the Go backend. Must be called from the Extension process.
     ///
@@ -82,13 +99,15 @@ enum GoBridge {
         method: String,
         endpoint: String,
         body: Data? = nil,
-        readBody: Bool = true
+        readBody: Bool = true,
+        backend: GoBackendReference? = nil
     ) async throws -> LocalAPIResponse {
-        guard let app = application else { throw GoBridgeError.startFailed }
+        guard let app = (backend ?? captureBackend()).application else { throw GoBridgeError.startFailed }
 
         let inputStream: (any LibtailscaleInputStreamProtocol)? = body.map { DataInputStream($0) }
 
         let goResp = try app.callLocalAPI(timeoutMillis, method: method, endpoint: endpoint, body: inputStream)
+        defer { try? goResp.close() }
 
         let statusCode = goResp.statusCode()
         let bodyData = readBody ? try goResp.bodyBytes() : Data()
@@ -101,14 +120,16 @@ enum GoBridge {
         method: String,
         endpoint: String,
         bodyFileURL: URL,
-        readBody: Bool = true
+        readBody: Bool = true,
+        backend: GoBackendReference? = nil
     ) async throws -> LocalAPIResponse {
-        guard let app = application else { throw GoBridgeError.startFailed }
+        guard let app = (backend ?? captureBackend()).application else { throw GoBridgeError.startFailed }
 
         let inputStream = try FileInputStream(bodyFileURL)
         defer { try? inputStream.close() }
 
         let goResp = try app.callLocalAPI(timeoutMillis, method: method, endpoint: endpoint, body: inputStream)
+        defer { try? goResp.close() }
 
         let statusCode = goResp.statusCode()
         let bodyData = readBody ? try goResp.bodyBytes() : Data()
@@ -121,9 +142,10 @@ enum GoBridge {
         peerID: String,
         fileURL: URL,
         transferID: String,
-        readBody: Bool = true
+        readBody: Bool = true,
+        backend: GoBackendReference? = nil
     ) async throws -> LocalAPIResponse {
-        guard let app = application else { throw GoBridgeError.startFailed }
+        guard let app = (backend ?? captureBackend()).application else { throw GoBridgeError.startFailed }
 
         let fileName = fileURL.lastPathComponent.isEmpty ? "file" : fileURL.lastPathComponent
         let fileSize = try taildropFileSize(fileURL)
@@ -157,6 +179,7 @@ enum GoBridge {
             endpoint: "/localapi/v0/file-put/\(peerID)",
             parts: parts
         )
+        defer { try? goResp.close() }
 
         let statusCode = goResp.statusCode()
         let bodyData = readBody ? try goResp.bodyBytes() : Data()
@@ -194,12 +217,6 @@ enum GoBridge {
         packetCallback = nil
     }
 
-    /// Inject a packet read from NEPacketTunnelFlow into the Go TUN device.
-    static func injectInboundPacket(_ packet: Data) throws {
-        guard let app = application else { throw GoBridgeError.startFailed }
-        try app.injectInboundPacket(packet)
-    }
-
     /// Bind asynchronous packet work to this backend, even if a later start
     /// replaces the process-wide application before that work runs.
     static func capturePacketHandlers() -> GoPacketHandlers? {
@@ -219,11 +236,6 @@ enum GoBridge {
     /// and the network behind that interface may have changed.
     static func networkChanged() {
         application?.networkChanged()
-    }
-
-    /// Rebind MagicSock's underlay sockets after detecting one-way packet flow.
-    static func rebindUnderlay(reason: String) {
-        application?.rebindUnderlay(reason)
     }
 
     /// Stop watching notifications.
@@ -263,6 +275,8 @@ enum GoBridge {
     static var coreVersion: String { "unavailable (UI stub)" }
     static var application: AnyObject? { nil }
 
+    static func captureBackend() -> GoBackendReference { GoBackendReference() }
+
     static func start(dataDir: String, directFileRoot: String, hwAttestation: Bool, appLogin: Bool = false) -> Bool {
         NSLog("[GoBridge] start() — stub, Go backend not built. Run ios/build_go.sh first.")
         return false
@@ -278,7 +292,8 @@ enum GoBridge {
         method: String,
         endpoint: String,
         body: Data? = nil,
-        readBody: Bool = true
+        readBody: Bool = true,
+        backend: GoBackendReference? = nil
     ) async throws -> LocalAPIResponse {
         NSLog("[GoBridge] callLocalAPI(\(method) \(endpoint)) — stub")
         throw GoBridgeError.notImplemented
@@ -289,7 +304,8 @@ enum GoBridge {
         method: String,
         endpoint: String,
         bodyFileURL: URL,
-        readBody: Bool = true
+        readBody: Bool = true,
+        backend: GoBackendReference? = nil
     ) async throws -> LocalAPIResponse {
         NSLog("[GoBridge] callLocalAPI(\(method) \(endpoint), file=\(bodyFileURL.lastPathComponent)) — stub")
         throw GoBridgeError.notImplemented
@@ -300,7 +316,8 @@ enum GoBridge {
         peerID: String,
         fileURL: URL,
         transferID: String,
-        readBody: Bool = true
+        readBody: Bool = true,
+        backend: GoBackendReference? = nil
     ) async throws -> LocalAPIResponse {
         NSLog("[GoBridge] callTaildropFilePut(peerID=\(peerID), transferID=\(transferID), file=\(fileURL.lastPathComponent)) — stub")
         throw GoBridgeError.notImplemented
@@ -314,11 +331,6 @@ enum GoBridge {
         NSLog("[GoBridge] clearPacketCallback — stub")
     }
 
-    static func injectInboundPacket(_ packet: Data) throws {
-        NSLog("[GoBridge] injectInboundPacket(\(packet.count) bytes) — stub")
-        throw GoBridgeError.notImplemented
-    }
-
     static func capturePacketHandlers() -> GoPacketHandlers? { nil }
 
     static func updateDefaultRouteInterface(_ ifName: String) {
@@ -326,10 +338,6 @@ enum GoBridge {
     }
 
     static func networkChanged() {}
-
-    static func rebindUnderlay(reason: String) {
-        NSLog("[GoBridge] rebindUnderlay(\(reason)) — stub")
-    }
 
     static func stopNotifications(_ handle: NotificationHandle) {
         NSLog("[GoBridge] stopNotifications() — stub")
@@ -365,13 +373,11 @@ struct LocalAPIResponse {
 enum GoBridgeError: Error, LocalizedError {
     case notImplemented
     case startFailed
-    case callFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .notImplemented: return "Go backend not integrated"
         case .startFailed: return "Go backend failed to start"
-        case .callFailed(let msg): return "LocalAPI call failed: \(msg)"
         }
     }
 }

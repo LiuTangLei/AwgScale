@@ -17,20 +17,6 @@ struct InAppBrowserProxy: Decodable {
     let address: String
 }
 
-struct InAppTerminalRequest: Encodable {
-    let host: String
-    let port: Int
-    let payload: String
-    let appendNewline: Bool
-    let timeoutMillis: Int
-}
-
-struct InAppTerminalResponse: Decodable {
-    let body: String?
-    let bodyBase64: String?
-    let truncated: Bool
-}
-
 struct InAppSSHOpenRequest: Encodable {
     let host: String
     let port: Int
