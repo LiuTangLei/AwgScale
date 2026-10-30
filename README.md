@@ -6,39 +6,16 @@ AwgScale is independent software — not affiliated with, sponsored by, or appro
 
 ---
 
-## 1.104.2 preview
+## 1.104.4
 
-Local **build 14** continues the [official implementation comparison](docs/ios-official-reliability-20261026.md)
-with further request/response lifecycle fixes and verified dead-code removal.
-See [the legacy code audit](docs/ios-legacy-cleanup-20261027.md).
-This candidate has not been published; the link below is the existing preview.
+[Download AwgScale 1.104.4](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.104.4).
 
-[Download the 1.104.2 preview](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.104.2).
+- Updated Tailscale core to 1.104.4 with native WireGuard, AWG v2/v3 and QUIC.
+- Improved network switching, MagicDNS, connection recovery and login storage.
+- Fixed Share Sheet cancellation and cleaned up request and logging resources.
 
-Uses the verified 1.104.2 fork core, QUIC `10dfe69b6d4c`, uTLS `7effde6a93dc`,
-and WireGuard `v0.0.34`. Hardens backend startup, request timeouts, logout,
-Keychain updates and Share Sheet cancellation. See
-[the comparison and validation record](docs/ios-reliability-20261021.md).
-
-The Settings screen has one **QUIC** choice; HTTP/3 is its built-in carrier, not
-a separate selection. QUIC carries native IP directly, not WireGuard packets.
-
-Selecting QUIC clears saved AWG parameters and restarts the active app backend
-or packet tunnel. Applying/syncing AWG coordinates native mode and its profile,
-then activates them with a restart. The UI verifies the actual running mode,
-no pending restart, and the reloaded AWG profile before reporting success.
-Existing App Group, Keychain, package identifiers and native AWG v2/v3 support
-are preserved. All communicating peers need compatible active modes.
-
-The IPA is **ad-hoc/TrollStore-oriented**, not Apple distribution-signed or an
-App Store/TestFlight release. This release embeds the published fork core
-1.104.2 and WireGuard fork 0.0.34. The iOS bridge adapts the new shared-buffer
-TUN API and the new initial-status/peer notification API, preserving the
-complete network snapshot consumed by the app and its extension.
-
-The preview remains experimental: simulator checks do not validate system-VPN
-traffic on a physical iOS device. Release assets include the build manifest
-and verification report with the exact completed checks and limitations.
+Install the IPA with TrollStore, or re-sign it using your Apple developer profile.
+QUIC uses HTTP/3 automatically; select QUIC on every communicating peer.
 
 ## Which install method are you using?
 
@@ -92,7 +69,7 @@ xcodebuild build -project AwgScale.xcodeproj -scheme AwgScale \
 ```
 
 `build_go.sh` verifies the published dependencies before compiling:
-`github.com/LiuTangLei/tailscale v1.104.2`,
+`github.com/LiuTangLei/tailscale v1.104.4`,
 `github.com/LiuTangLei/wireguard-go v0.0.34`, and
 `github.com/LiuTangLei/quic-go v0.63.0-tailscale.1.0.20261021083103-10dfe69b6d4c`,
 and `github.com/LiuTangLei/utls v1.8.3-0.20261021023852-7effde6a93dc`.

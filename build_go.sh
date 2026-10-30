@@ -67,8 +67,8 @@ UTLS_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{
 UTLS_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/refraction-networking/utls)"
 
 if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
-      "$TAILSCALE_VERSION" != "v1.104.2" ]]; then
-    echo "error: expected github.com/LiuTangLei/tailscale v1.104.2, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+      "$TAILSCALE_VERSION" != "v1.104.4" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.104.4, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
     exit 1
 fi
 if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||
@@ -119,7 +119,7 @@ gomobile bind \
     -target "$TARGET_FLAG" \
     -o "$OUTPUT" \
     -iosversion 15.0 \
-    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.2 -X tailscale.com/version.longStamp=1.104.2-td7efe75c7 -X tailscale.com/version.gitCommitStamp=d7efe75c7cce10651036bda98145e550ce0986ff" \
+    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.4 -X tailscale.com/version.longStamp=1.104.4-tf58b730c8 -X tailscale.com/version.gitCommitStamp=f58b730c8c1eb30c00127e6a2ebe4fa0540d29f1" \
     ./libtailscale
 
 # Some gomobile/Xcode combinations emit framework Info.plist files with
