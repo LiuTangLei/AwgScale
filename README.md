@@ -6,13 +6,13 @@ AwgScale is independent software — not affiliated with, sponsored by, or appro
 
 ---
 
-## 1.104.4
+## 1.104.6
 
-[Download AwgScale 1.104.4](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.104.4).
+[Download AwgScale 1.104.6](https://github.com/LiuTangLei/AwgScale/releases/tag/v1.104.6).
 
-- Updated Tailscale core to 1.104.4 with native WireGuard, AWG v2/v3 and QUIC.
-- Improved network switching, MagicDNS, connection recovery and login storage.
-- Fixed Share Sheet cancellation and cleaned up request and logging resources.
+- Updated the Tailscale core to `v1.104.6-r1` with native WireGuard, AWG v2/v3 and QUIC.
+- Includes shared-core connection startup, 0-RTT resend and path-MTU recovery fixes.
+- App release `v1.104.6`, build 16; 152 Simulator tests passed. Physical-device and mobile-WAN validation are not claimed.
 
 Install the IPA with TrollStore, or re-sign it using your Apple developer profile.
 QUIC uses HTTP/3 automatically; select QUIC on every communicating peer.
@@ -69,9 +69,9 @@ xcodebuild build -project AwgScale.xcodeproj -scheme AwgScale \
 ```
 
 `build_go.sh` verifies the published dependencies before compiling:
-`github.com/LiuTangLei/tailscale v1.104.4`,
-`github.com/LiuTangLei/wireguard-go v0.0.34`, and
-`github.com/LiuTangLei/quic-go v0.63.0-tailscale.1.0.20261021083103-10dfe69b6d4c`,
+`github.com/LiuTangLei/tailscale v1.104.6-r1`,
+`github.com/LiuTangLei/wireguard-go v0.0.35`,
+`github.com/LiuTangLei/quic-go v0.65.0-quic.4`,
 and `github.com/LiuTangLei/utls v1.8.3-0.20261021023852-7effde6a93dc`.
 It uses Go 1.27.3 and matching gomobile/gobind tools. `GOWORK=off` prevents
 ambient local source replacements. Native AWG v2/v3 and QUIC remain supported.
