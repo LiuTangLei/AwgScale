@@ -67,18 +67,18 @@ UTLS_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{
 UTLS_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/refraction-networking/utls)"
 
 if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
-      "$TAILSCALE_VERSION" != "v1.104.4" ]]; then
-    echo "error: expected github.com/LiuTangLei/tailscale v1.104.4, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+      "$TAILSCALE_VERSION" != "v1.104.6-r1" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.104.6-r1, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
     exit 1
 fi
 if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||
-      "$WIREGUARD_VERSION" != "v0.0.34" ]]; then
-    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.34, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
+      "$WIREGUARD_VERSION" != "v0.0.35" ]]; then
+    echo "error: expected github.com/LiuTangLei/wireguard-go v0.0.35, got $WIREGUARD_SOURCE $WIREGUARD_VERSION" >&2
     exit 1
 fi
 if [[ "$QUICGO_SOURCE" != "github.com/LiuTangLei/quic-go" ||
-      "$QUICGO_VERSION" != "v0.63.0-tailscale.1.0.20261021083103-10dfe69b6d4c" ]]; then
-    echo "error: expected github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go v0.63.0-tailscale.1.0.20261021083103-10dfe69b6d4c, got $QUICGO_SOURCE $QUICGO_VERSION" >&2
+      "$QUICGO_VERSION" != "v0.65.0-quic.4" ]]; then
+    echo "error: expected github.com/quic-go/quic-go => github.com/LiuTangLei/quic-go v0.65.0-quic.4, got $QUICGO_SOURCE $QUICGO_VERSION" >&2
     exit 1
 fi
 if [[ "$UTLS_SOURCE" != "github.com/LiuTangLei/utls" ||
@@ -119,7 +119,7 @@ gomobile bind \
     -target "$TARGET_FLAG" \
     -o "$OUTPUT" \
     -iosversion 15.0 \
-    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.4 -X tailscale.com/version.longStamp=1.104.4-tf58b730c8 -X tailscale.com/version.gitCommitStamp=f58b730c8c1eb30c00127e6a2ebe4fa0540d29f1" \
+    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.6 -X tailscale.com/version.longStamp=1.104.6-t42e1cdcb7 -X tailscale.com/version.gitCommitStamp=42e1cdcb7e058f64104aa7f4f42e7b3dda015253" \
     ./libtailscale
 
 # Some gomobile/Xcode combinations emit framework Info.plist files with

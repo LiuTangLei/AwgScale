@@ -333,7 +333,7 @@ func (a *App) dialInAppTailnetTCP(ctx context.Context, b *backend, network, addr
 		return dialInAppNetstackTCP(ctx, b, addrs, uint16(port))
 	}
 
-	if addrs, ok := resolveInAppTailnetDNSAddrs(b, host); ok {
+	if addrs, ok := resolveInAppTailnetDNSAddrs(ctx, b, host); ok {
 		return dialInAppNetstackTCP(ctx, b, addrs, uint16(port))
 	}
 
@@ -395,14 +395,14 @@ func dialInAppDirectTCP(ctx context.Context, network, address string) (net.Conn,
 	return d.DialContext(ctx, network, address)
 }
 
-func resolveInAppTailnetDNSAddrs(b *backend, host string) ([]netip.Addr, bool) {
+func resolveInAppTailnetDNSAddrs(ctx context.Context, b *backend, host string) ([]netip.Addr, bool) {
 	if b == nil || b.backend == nil {
 		return nil, false
 	}
 
 	var addrs []netip.Addr
 	for _, qtype := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
-		res, _, err := b.backend.QueryDNS(host, qtype)
+		res, _, err := b.backend.QueryDNS(ctx, host, qtype)
 		if err != nil {
 			continue
 		}
