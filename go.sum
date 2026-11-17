@@ -8,8 +8,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/LiuTangLei/quic-go v0.65.0-quic.4 h1:Xn6XnduCtGW6UHPNJai82ESkzkDWgMrJF89YAASY8bI=
 github.com/LiuTangLei/quic-go v0.65.0-quic.4/go.mod h1:OUW5S5Qu4zqjFGFlPthYnILnS4Voqo83pZqiRmWCmmk=
-github.com/LiuTangLei/tailscale v1.104.6-r1 h1:7AsPBjVOAyrzhzN+E82HME7lpFeQ9QpJ1DPmfjb2vjY=
-github.com/LiuTangLei/tailscale v1.104.6-r1/go.mod h1:QSXLKlRlzzXWnmraBtsxQM6oS9jxgfViGbYmQEpWlpw=
+github.com/LiuTangLei/tailscale v1.104.7 h1:6i6HjOk7+cQ5NuksXHaEZoHCUE+g6OMgxYmoso37bDs=
+github.com/LiuTangLei/tailscale v1.104.7/go.mod h1:nS+gcyU6Gc5Z8XSCc3O2+7zxZkI8Q2HV34EpN8t8smo=
 github.com/LiuTangLei/utls v1.8.3-0.20261021023852-7effde6a93dc h1:T3DDZUtc9ENa2lQ8BVzm0SdZ+If8WFXIwu/QyY0fsJM=
 github.com/LiuTangLei/utls v1.8.3-0.20261021023852-7effde6a93dc/go.mod h1:jkSOEkLqn+S/jtpEHPOsVv/4V4EVnelwbMQl4vCWXAM=
 github.com/LiuTangLei/wireguard-go v0.0.35 h1:A0UdzeplX7CQFhq89sNMhgxcJbtAzS4MCoMLgsPivkQ=

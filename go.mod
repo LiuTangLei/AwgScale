@@ -1,13 +1,13 @@
 module github.com/LiuTangLei/awgscale-ios
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/LiuTangLei/wireguard-go v0.0.35
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mobile v0.0.0-20260312152759-81488f6aeb60
 	golang.org/x/net v0.60.0
-	tailscale.com v1.104.6
+	tailscale.com v1.104.7
 )
 
 require (
@@ -58,7 +58,7 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260915211658-a6f909f08a72 // indirect
 )
 
-replace tailscale.com => github.com/LiuTangLei/tailscale v1.104.6-r1
+replace tailscale.com => github.com/LiuTangLei/tailscale v1.104.7
 
 // The published core pins WG-over-QUIC/H3 to the Tailscale-maintained quic-go
 // fork. A dependency-level replace does not apply to this main module, so the

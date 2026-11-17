@@ -19,10 +19,10 @@ cd "$SCRIPT_DIR"
 # Release builds must use the versioned forks in go.mod, never an ambient
 # parent workspace that happens to contain unreleased protocol changes.
 export GOWORK=off
-# The published core requires Go >= 1.27.3 and is validated against 1.27.3.
+# The published core requires Go >= 1.27.4 and is validated against 1.27.4.
 # Pin the toolchain so gomobile/gobind and every `go` invocation below build
 # with the same compiler used to qualify the release.
-export GOTOOLCHAIN=go1.27.3
+export GOTOOLCHAIN=go1.27.4
 # Keep caller-provided build flags, but make dependency resolution immutable.
 # Appending makes this the effective -mod value if GOFLAGS already contains one.
 export GOFLAGS="${GOFLAGS:+$GOFLAGS }-mod=readonly"
@@ -67,8 +67,8 @@ UTLS_SOURCE="$(go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{
 UTLS_VERSION="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' github.com/refraction-networking/utls)"
 
 if [[ "$TAILSCALE_SOURCE" != "github.com/LiuTangLei/tailscale" ||
-      "$TAILSCALE_VERSION" != "v1.104.6-r1" ]]; then
-    echo "error: expected github.com/LiuTangLei/tailscale v1.104.6-r1, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
+      "$TAILSCALE_VERSION" != "v1.104.7" ]]; then
+    echo "error: expected github.com/LiuTangLei/tailscale v1.104.7, got $TAILSCALE_SOURCE $TAILSCALE_VERSION" >&2
     exit 1
 fi
 if [[ "$WIREGUARD_SOURCE" != "github.com/LiuTangLei/wireguard-go" ||
@@ -119,7 +119,7 @@ gomobile bind \
     -target "$TARGET_FLAG" \
     -o "$OUTPUT" \
     -iosversion 15.0 \
-    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.6 -X tailscale.com/version.longStamp=1.104.6-t42e1cdcb7 -X tailscale.com/version.gitCommitStamp=42e1cdcb7e058f64104aa7f4f42e7b3dda015253" \
+    -ldflags="-s -w -X tailscale.com/version.shortStamp=1.104.7 -X tailscale.com/version.longStamp=1.104.7-ta32d18362 -X tailscale.com/version.gitCommitStamp=a32d18362c987e5007eab9f76c69118947a7b047" \
     ./libtailscale
 
 # Some gomobile/Xcode combinations emit framework Info.plist files with
